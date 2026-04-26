@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import html
+import os
 import queue
 import re
+import signal
 import sys
 import threading
 import time
@@ -24,41 +27,175 @@ hv.extension("bokeh")
 
 
 
+SESSION_EXIT_DELAY_SECONDS = 3.0
+_LIFECYCLE_LOCK = threading.RLock()
+_ACTIVE_SESSIONS = 0
+_ACTIVE_APPS: set[object] = set()
+_EXIT_TIMER: threading.Timer | None = None
+_CLEANING_UP = False
+
+
+def register_app_instance(app: object) -> None:
+    with _LIFECYCLE_LOCK:
+        _ACTIVE_APPS.add(app)
+
+
+def unregister_app_instance(app: object) -> None:
+    with _LIFECYCLE_LOCK:
+        _ACTIVE_APPS.discard(app)
+
+
+def cleanup_runtime() -> None:
+    global _CLEANING_UP
+    with _LIFECYCLE_LOCK:
+        if _CLEANING_UP:
+            return
+        _CLEANING_UP = True
+        apps = list(_ACTIVE_APPS)
+    for app in apps:
+        shutdown = getattr(app, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _exit_process_if_idle() -> None:
+    with _LIFECYCLE_LOCK:
+        should_exit = _ACTIVE_SESSIONS <= 0
+    if not should_exit:
+        return
+    cleanup_runtime()
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        os._exit(0)
+
+
+def schedule_process_exit_if_idle() -> None:
+    global _EXIT_TIMER
+    with _LIFECYCLE_LOCK:
+        if _ACTIVE_SESSIONS > 0:
+            return
+        if _EXIT_TIMER is not None:
+            _EXIT_TIMER.cancel()
+        _EXIT_TIMER = threading.Timer(SESSION_EXIT_DELAY_SECONDS, _exit_process_if_idle)
+        _EXIT_TIMER.daemon = True
+        _EXIT_TIMER.start()
+
+
+def register_page_session(app: object | None = None) -> None:
+    global _ACTIVE_SESSIONS, _EXIT_TIMER
+    with _LIFECYCLE_LOCK:
+        _ACTIVE_SESSIONS += 1
+        if _EXIT_TIMER is not None:
+            _EXIT_TIMER.cancel()
+            _EXIT_TIMER = None
+
+    closed = False
+
+    def _on_destroyed(_session_context) -> None:
+        nonlocal closed
+        global _ACTIVE_SESSIONS
+        if closed:
+            return
+        closed = True
+        if app is not None:
+            shutdown = getattr(app, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+        with _LIFECYCLE_LOCK:
+            _ACTIVE_SESSIONS = max(0, _ACTIVE_SESSIONS - 1)
+        schedule_process_exit_if_idle()
+
+    pn.state.on_session_destroyed(_on_destroyed)
+
+
+def _handle_exit_signal(_signum, _frame) -> None:
+    cleanup_runtime()
+    raise SystemExit(0)
+
+
+atexit.register(cleanup_runtime)
+for _signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+    _signal_value = getattr(signal, _signal_name, None)
+    if _signal_value is not None:
+        try:
+            signal.signal(_signal_value, _handle_exit_signal)
+        except (OSError, ValueError):
+            pass
+
+
+
+
 RAW_CSS = """
 :root {
-  --lab-ink: #1d1d1f;
-  --lab-muted: #6e6e73;
-  --lab-line: rgba(60, 60, 67, 0.14);
-  --lab-paper: #f6f7f9;
-  --lab-card: rgba(255, 255, 255, 0.92);
-  --lab-blue: #0071e3;
-  --lab-green: #248a3d;
-  --lab-orange: #bf5a00;
-  --lab-purple: #8944ab;
-  --lab-red: #d70015;
-  --lab-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
-  --lab-shadow-strong: 0 16px 40px rgba(15, 23, 42, 0.10);
+  --ios-bg: #f2f2f7;
+  --ios-card: rgba(255, 255, 255, 0.96);
+  --ios-card-solid: #ffffff;
+  --ios-elevated: rgba(255, 255, 255, 0.82);
+  --ios-label: #1c1c1e;
+  --ios-secondary: #636366;
+  --ios-tertiary: #8e8e93;
+  --ios-separator: rgba(60, 60, 67, 0.16);
+  --ios-fill: rgba(120, 120, 128, 0.12);
+  --ios-blue: #007aff;
+  --ios-green: #34c759;
+  --ios-orange: #ff9500;
+  --ios-purple: #af52de;
+  --ios-red: #ff3b30;
+  --ios-shadow: 0 12px 30px rgba(60, 60, 67, 0.10);
+  --ios-shadow-soft: 0 6px 18px rgba(60, 60, 67, 0.08);
+  --lab-ink: var(--ios-label);
+  --lab-muted: var(--ios-secondary);
+  --lab-line: var(--ios-separator);
+  --lab-paper: var(--ios-bg);
+  --lab-card: var(--ios-card);
+  --lab-blue: var(--ios-blue);
+  --lab-green: var(--ios-green);
+  --lab-orange: var(--ios-orange);
+  --lab-purple: var(--ios-purple);
+  --lab-red: var(--ios-red);
+  --lab-shadow: var(--ios-shadow-soft);
+  --lab-shadow-strong: var(--ios-shadow);
+}
+html,
+body {
+  background: var(--ios-bg);
+  min-height: 100%;
 }
 .bk-root, body {
   font-family: "SF Pro Display", "SF Pro Text", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif;
-  background: #f6f7f9;
+  -webkit-font-smoothing: antialiased;
+  background: var(--ios-bg);
   color: var(--lab-ink);
 }
+.bk-root * {
+  box-sizing: border-box;
+}
 .bk-root .sidebar {
-  background: rgba(255, 255, 255, 0.94) !important;
-  border-right: 1px solid var(--lab-line);
+  backdrop-filter: saturate(180%) blur(22px);
+  -webkit-backdrop-filter: saturate(180%) blur(22px);
+  background: rgba(242, 242, 247, 0.88) !important;
+  border-right: 1px solid var(--ios-separator);
+  padding: 18px 14px !important;
 }
 .bk-root .main {
-  max-width: 1520px;
+  max-width: 1480px;
   margin: 0 auto;
+  padding: 18px 22px 36px !important;
 }
 #header,
 .app-header,
 .pn-template-header {
-  background: rgba(255, 255, 255, 0.94) !important;
+  backdrop-filter: saturate(180%) blur(22px);
+  -webkit-backdrop-filter: saturate(180%) blur(22px);
+  background: rgba(248, 248, 248, 0.82) !important;
   color: var(--lab-ink) !important;
-  border-bottom: 1px solid rgba(60, 60, 67, 0.12);
-  box-shadow: 0 6px 22px rgba(15, 23, 42, 0.06);
+  border-bottom: 0.5px solid rgba(60, 60, 67, 0.22);
+  box-shadow: none;
 }
 #header a,
 .app-header a,
@@ -67,56 +204,74 @@ RAW_CSS = """
 .app-header .title,
 .pn-template-header .title {
   color: var(--lab-ink) !important;
-  font-weight: 760;
-  letter-spacing: -0.02em;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 .lab-hero {
-  background: var(--lab-card);
+  background: var(--ios-card);
   color: var(--lab-ink);
-  border: 1px solid rgba(60, 60, 67, 0.12);
-  border-left: 4px solid var(--lab-blue);
-  border-radius: 14px;
-  padding: 22px 26px;
+  border: 0.5px solid var(--ios-separator);
+  border-radius: 20px;
+  padding: 24px 26px 22px;
   box-shadow: var(--lab-shadow-strong);
 }
 .lab-hero h1 {
   margin: 0 0 8px 0;
-  font-size: clamp(26px, 2.4vw, 38px);
-  font-weight: 820;
+  font-size: 34px;
+  font-weight: 760;
+  letter-spacing: 0;
 }
 .lab-hero p {
   margin: 0;
   color: var(--lab-muted);
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.55;
+}
+.hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 .metric-grid, .experiment-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
   gap: 12px;
 }
 .metric-card, .experiment-card {
-  background: var(--lab-card);
-  border: 1px solid rgba(60, 60, 67, 0.12);
-  border-radius: 14px;
-  padding: 14px 16px;
+  background: var(--ios-card-solid);
+  border: 0.5px solid var(--ios-separator);
+  border-left: 3px solid transparent;
+  border-radius: 18px;
+  padding: 15px 16px;
   box-shadow: var(--lab-shadow);
 }
 .experiment-card {
-  min-height: 132px;
-  transition: transform 180ms ease, box-shadow 180ms ease;
+  min-height: 142px;
+  position: relative;
+  transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
   cursor: pointer;
 }
+.experiment-card::after {
+  content: "›";
+  color: var(--ios-tertiary);
+  font-size: 30px;
+  font-weight: 300;
+  line-height: 1;
+  position: absolute;
+  right: 16px;
+  top: 18px;
+}
 .experiment-card-basic {
-  border-top: 3px solid rgba(0, 113, 227, 0.70);
+  border-left-color: var(--ios-blue);
 }
 .experiment-card-coupled {
-  border-top: 3px solid rgba(137, 68, 171, 0.72);
-  background: var(--lab-card);
+  border-left-color: var(--ios-purple);
+  background: var(--ios-card-solid);
 }
 .experiment-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.12);
+  box-shadow: 0 16px 34px rgba(60, 60, 67, 0.14);
 }
 .experiment-card-link {
   color: inherit;
@@ -126,26 +281,27 @@ RAW_CSS = """
 .experiment-card-link:focus .experiment-card,
 .experiment-card-link:hover .experiment-card {
   transform: translateY(-2px);
-  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.12);
+  box-shadow: 0 16px 34px rgba(60, 60, 67, 0.14);
 }
 .experiment-card-action {
-  color: var(--lab-blue);
+  color: var(--ios-blue);
   display: inline-block;
   font-weight: 700;
-  margin-top: 8px;
+  margin-top: 10px;
   text-decoration: none;
 }
 .metric-name {
   color: var(--lab-muted);
   font-size: 12px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-weight: 640;
+  letter-spacing: 0;
 }
 .metric-value {
   color: var(--lab-ink);
   font-size: 24px;
-  font-weight: 760;
+  font-weight: 720;
   margin-top: 4px;
+  overflow-wrap: anywhere;
 }
 .metric-unit {
   color: var(--lab-muted);
@@ -154,13 +310,13 @@ RAW_CSS = """
 }
 .section-title {
   color: var(--lab-ink);
-  font-size: 18px;
-  font-weight: 760;
-  margin: 10px 0 6px 0;
-  letter-spacing: -0.01em;
+  font-size: 20px;
+  font-weight: 730;
+  letter-spacing: 0;
+  margin: 12px 2px 10px;
 }
 .portal-section {
-  margin-top: 18px;
+  margin-top: 22px;
 }
 .section-kicker {
   color: var(--lab-muted);
@@ -168,29 +324,44 @@ RAW_CSS = """
   margin: 0 0 12px 0;
 }
 .status-pill {
-  display: inline-block;
-  background: rgba(0, 113, 227, 0.08);
-  color: var(--lab-blue);
-  border: 1px solid rgba(0, 113, 227, 0.16);
+  display: inline-flex;
+  align-items: center;
+  background: rgba(0, 122, 255, 0.10);
+  color: var(--ios-blue);
+  border: 0.5px solid rgba(0, 122, 255, 0.20);
   border-radius: 999px;
-  padding: 4px 10px;
+  padding: 5px 10px;
   margin: 2px 6px 2px 0;
   font-size: 12px;
+  font-weight: 650;
 }
 .equation-box {
-  background: var(--lab-card);
-  border: 1px solid var(--lab-line);
-  border-radius: 14px;
-  padding: 14px 16px;
+  background: var(--ios-card-solid);
+  border: 0.5px solid var(--lab-line);
+  border-radius: 18px;
+  padding: 16px 18px;
   color: var(--lab-ink);
   box-shadow: var(--lab-shadow);
 }
 .apple-panel {
-  background: var(--lab-card);
-  border: 1px solid rgba(60, 60, 67, 0.12);
-  border-radius: 14px;
+  background: var(--ios-card);
+  border: 0.5px solid var(--ios-separator);
+  border-radius: 20px;
   padding: 16px;
   box-shadow: var(--lab-shadow);
+}
+.metric-section {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+.apple-panel h3 {
+  color: var(--ios-secondary);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin: 0 0 10px;
 }
 .workflow-strip {
   display: grid;
@@ -198,9 +369,9 @@ RAW_CSS = """
   gap: 12px;
 }
 .workflow-item {
-  background: var(--lab-card);
-  border: 1px solid rgba(60,60,67,0.10);
-  border-radius: 14px;
+  background: var(--ios-card-solid);
+  border: 0.5px solid rgba(60,60,67,0.12);
+  border-radius: 18px;
   padding: 14px 16px;
 }
 .workflow-index {
@@ -211,7 +382,7 @@ RAW_CSS = """
   height: 24px;
   margin-right: 8px;
   border-radius: 999px;
-  background: var(--lab-blue);
+  background: var(--ios-blue);
   color: white;
   font-size: 12px;
   font-weight: 760;
@@ -228,15 +399,15 @@ RAW_CSS = """
   line-height: 1.55;
 }
 .plot-card {
-  background: var(--lab-card);
-  border: 1px solid rgba(60, 60, 67, 0.12);
-  border-radius: 14px;
-  padding: 12px;
+  background: var(--ios-card-solid);
+  border: 0.5px solid rgba(60, 60, 67, 0.14);
+  border-radius: 20px;
+  padding: 12px 14px 16px;
   box-shadow: var(--lab-shadow);
   overflow: hidden;
 }
 .plot-card-time {
-  min-height: 355px;
+  min-height: 420px;
 }
 .plot-card-relation {
   min-height: 400px;
@@ -251,42 +422,130 @@ RAW_CSS = """
   align-items: center;
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  margin: 0 0 10px 2px;
+  gap: 10px;
+  margin: 0 0 12px 2px;
 }
 .plot-title {
   color: var(--lab-ink);
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 720;
 }
 .tab-shell {
-  background: var(--lab-card);
-  border: 1px solid rgba(60, 60, 67, 0.12);
-  border-radius: 16px;
-  padding: 14px;
-  box-shadow: var(--lab-shadow);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
 }
 .bk-root .bk-btn {
-  border-radius: 10px !important;
-  font-weight: 680 !important;
-  border: 1px solid rgba(60, 60, 67, 0.12) !important;
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
+  border: 0.5px solid transparent !important;
+  border-radius: 13px !important;
+  box-shadow: none !important;
+  font-weight: 700 !important;
+  min-height: 36px !important;
+  transition: opacity 160ms ease, transform 160ms ease, background 160ms ease;
+}
+.bk-root .bk-btn:hover {
+  opacity: 0.88;
+  transform: translateY(-1px);
+}
+.bk-root .bk-btn:disabled {
+  opacity: 0.45 !important;
+  transform: none;
+}
+.bk-root .bk-btn-primary {
+  background: var(--ios-blue) !important;
+  border-color: var(--ios-blue) !important;
+  color: #ffffff !important;
+}
+.bk-root .bk-btn-success {
+  background: var(--ios-green) !important;
+  border-color: var(--ios-green) !important;
+  color: #ffffff !important;
+}
+.bk-root .bk-btn-warning {
+  background: var(--ios-orange) !important;
+  border-color: var(--ios-orange) !important;
+  color: #ffffff !important;
+}
+.bk-root .bk-btn-danger {
+  background: var(--ios-red) !important;
+  border-color: var(--ios-red) !important;
+  color: #ffffff !important;
+}
+.bk-root .bk-btn-light,
+.bk-root .bk-btn-default {
+  background: var(--ios-fill) !important;
+  border-color: transparent !important;
+  color: var(--ios-blue) !important;
 }
 .bk-root .bk-input,
-.bk-root input {
-  border-radius: 10px !important;
+.bk-root input,
+.bk-root select {
+  background: var(--ios-card-solid) !important;
+  border: 0.5px solid var(--ios-separator) !important;
+  border-radius: 12px !important;
+  color: var(--ios-label) !important;
+  min-height: 34px !important;
+}
+.bk-root .bk-slider-title,
+.bk-root label {
+  color: var(--ios-secondary) !important;
+  font-size: 13px !important;
+  font-weight: 650 !important;
+}
+.bk-root .bk-tabs-header {
+  background: var(--ios-fill) !important;
+  border: 0 !important;
+  border-radius: 14px !important;
+  gap: 3px;
+  margin-bottom: 14px;
+  padding: 3px !important;
 }
 .bk-root .bk-tab {
-  border-radius: 10px 10px 0 0 !important;
-  font-weight: 680;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 11px !important;
+  color: var(--ios-secondary) !important;
+  font-weight: 700;
+  letter-spacing: 0;
+  min-height: 34px;
+  padding: 8px 14px !important;
+}
+.bk-root .bk-tab.bk-active,
+.bk-root .bk-tab[aria-selected="true"] {
+  background: var(--ios-card-solid) !important;
+  box-shadow: 0 2px 8px rgba(60, 60, 67, 0.16);
+  color: var(--ios-label) !important;
+}
+.bk-root .bk-toolbar {
+  background: rgba(255, 255, 255, 0.78) !important;
+  border: 0.5px solid var(--ios-separator) !important;
+  border-radius: 12px !important;
+  padding: 3px !important;
+}
+.bk-root .bk-toolbar-button {
+  border-radius: 9px !important;
+}
+.bk-root .bk-DataTable,
+.bk-root .tabulator {
+  border: 0.5px solid var(--ios-separator) !important;
+  border-radius: 16px !important;
+  overflow: hidden;
+}
+.bk-root .tabulator .tabulator-header {
+  background: #f9f9fb !important;
+  border-bottom: 0.5px solid var(--ios-separator) !important;
+}
+.bk-root .tabulator-row {
+  border-bottom: 0.5px solid rgba(60, 60, 67, 0.10) !important;
 }
 .nav-link-button {
   align-items: center;
-  background: var(--lab-blue);
-  border: 1px solid rgba(0, 113, 227, 0.28);
-  border-radius: 10px;
-  box-shadow: 0 8px 18px rgba(0, 113, 227, 0.18);
-  color: white !important;
+  background: var(--ios-fill);
+  border: 0.5px solid transparent;
+  border-radius: 13px;
+  color: var(--ios-blue) !important;
   display: flex;
   font-size: 14px;
   font-weight: 720;
@@ -295,8 +554,31 @@ RAW_CSS = """
   text-decoration: none !important;
   width: 100%;
 }
+.nav-link-button::before {
+  content: "‹";
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 1;
+  margin-right: 4px;
+}
 .nav-link-button:hover {
-  background: #005bb5;
+  background: rgba(0, 122, 255, 0.16);
+}
+@media (max-width: 760px) {
+  .bk-root .main {
+    padding: 12px 12px 24px !important;
+  }
+  .lab-hero {
+    border-radius: 18px;
+    padding: 20px;
+  }
+  .lab-hero h1 {
+    font-size: 28px;
+  }
+  .metric-grid,
+  .experiment-grid {
+    grid-template-columns: 1fr;
+  }
 }
 """
 pn.extension("tabulator", raw_css=[RAW_CSS])
@@ -974,6 +1256,9 @@ class HistoryFitManager:
 class MonitorApp:
     def __init__(self, config: MonitorConfig):
         self.config = config
+        self._shutdown_lock = threading.RLock()
+        self._shutdown_complete = False
+        register_app_instance(self)
         self.data_queue: queue.Queue[dict[str, object]] = queue.Queue(maxsize=config.queue_size)
         self.serial_manager = SerialManager(config.ports, self.data_queue)
         self.sync_manager = SyncManager(config.ports.keys(), config.sync_timeout, config.max_sync_diff)
@@ -1132,11 +1417,18 @@ class MonitorApp:
         self._refresh_latest_cards()
 
     def shutdown(self) -> None:
-        if self.periodic_callback is not None:
-            self.periodic_callback.stop()
-            self.periodic_callback = None
-        self.collecting = False
-        self.serial_manager.stop_all()
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
+            if self.periodic_callback is not None:
+                self.periodic_callback.stop()
+                self.periodic_callback = None
+            self.collecting = False
+            self.serial_manager.stop_all()
+            self.sync_manager.buffer.clear()
+            self._discard_pending_packets()
+            unregister_app_instance(self)
 
     def view(self):
         if self.periodic_callback is None:
@@ -1145,7 +1437,7 @@ class MonitorApp:
                 period=self.config.plot_update_interval,
                 start=True,
             )
-        pn.state.on_session_destroyed(lambda _session_context: self.shutdown())
+        register_page_session(self)
         self._clear_plot_models()
         self.content_tabs = pn.Tabs(
             ("实时曲线", self._build_time_grid()),
@@ -1196,7 +1488,7 @@ class MonitorApp:
                 pn.Column(
                     self.summary_pane,
                     self.latest_pane,
-                    css_classes=["apple-panel"],
+                    css_classes=["metric-section"],
                     sizing_mode="stretch_width",
                 ),
                 pn.Column(
@@ -1208,8 +1500,9 @@ class MonitorApp:
         )
 
     def _build_hero(self) -> pn.pane.HTML:
-        ports = " | ".join(
-            f"{html.escape(port)} @ {config.baudrate} baud: {', '.join(config.channels)}"
+        ports = "".join(
+            f'<span class="status-pill">{html.escape(port)} · {config.baudrate} · '
+            f'{html.escape(", ".join(config.channels))}</span>'
             for port, config in self.config.ports.items()
         )
         return pn.pane.HTML(
@@ -1217,7 +1510,7 @@ class MonitorApp:
             <div class="lab-hero">
               <h1>{html.escape(self.config.title)}</h1>
               <p>{html.escape(self.config.subtitle)}</p>
-              <p style="margin-top: 8px;">{html.escape(ports)}</p>
+              <div class="hero-meta">{ports}</div>
             </div>
             """,
             sizing_mode="stretch_width",
@@ -1255,8 +1548,8 @@ class MonitorApp:
     def _build_time_grid(self) -> pn.GridBox:
         cards = []
         for plot in self.config.time_plots:
-            figure_model = self._create_time_plot(plot, width=520, height=285)
-            pane = pn.pane.Bokeh(figure_model, height=285, sizing_mode="stretch_width")
+            figure_model = self._create_time_plot(plot, width=980, height=350)
+            pane = pn.pane.Bokeh(figure_model, height=350, sizing_mode="stretch_width")
             self.time_panes[plot.axis_id] = pane
             cards.append(
                 pn.Column(
@@ -1266,7 +1559,7 @@ class MonitorApp:
                     sizing_mode="stretch_width",
                 )
             )
-        return pn.GridBox(*cards, ncols=max(1, self.config.dashboard_columns), sizing_mode="stretch_width")
+        return pn.GridBox(*cards, ncols=1, sizing_mode="stretch_width")
 
     def _build_relation_fit_layout(self) -> pn.Column:
         relation_items = []
@@ -1344,20 +1637,30 @@ class MonitorApp:
             height=height,
             x_range=Range1d(*x_range),
             y_range=Range1d(*y_range),
-            tools="pan,wheel_zoom,box_zoom,reset,save",
+            tools="pan,wheel_zoom,xwheel_zoom,ywheel_zoom,box_zoom,xbox_zoom,ybox_zoom,reset,save",
             toolbar_location="above",
             sizing_mode="stretch_width",
         )
         fig.xaxis.axis_label = x_label
         fig.yaxis.axis_label = y_label
         fig.background_fill_color = "#ffffff"
-        fig.grid.grid_line_alpha = 0.35
+        fig.border_fill_color = "#ffffff"
+        fig.outline_line_color = "#d1d1d6"
+        fig.grid.grid_line_color = "#d1d1d6"
+        fig.grid.grid_line_alpha = 0.28
+        fig.axis.major_label_text_color = "#3a3a3c"
+        fig.axis.axis_label_text_color = "#636366"
+        fig.title.text_color = "#1c1c1e"
         fig.title.text_font_size = "12pt"
+        fig.title.text_font_style = "bold"
         fig.xaxis.axis_label_text_font_size = "10pt"
         fig.yaxis.axis_label_text_font_size = "10pt"
-        wheel_zoom = fig.select_one(WheelZoomTool)
-        if wheel_zoom is not None:
-            fig.toolbar.active_scroll = wheel_zoom
+        fig.toolbar.logo = None
+        wheel_zoom_tools = [tool for tool in fig.tools if isinstance(tool, WheelZoomTool)]
+        for tool in wheel_zoom_tools:
+            if tool.dimensions == "both":
+                fig.toolbar.active_scroll = tool
+                break
         return fig
 
     def _create_time_plot(self, plot: TimePlotConfig, width: int, height: int):
@@ -2529,6 +2832,7 @@ def make_experiment_view(experiment: ExperimentSpec, export_root: str | None, sh
 
 
 def make_portal_view() -> pn.template.FastListTemplate:
+    register_page_session(None)
     cards = []
     for category, experiments in grouped_experiments().items():
         is_coupled = category == "耦合实验"
