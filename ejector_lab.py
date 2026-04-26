@@ -17,54 +17,48 @@ import numpy as np
 import pandas as pd
 import panel as pn
 import serial
+from bokeh.models import ColumnDataSource, HoverTool, Range1d, WheelZoomTool
+from bokeh.plotting import figure
 
 hv.extension("bokeh")
 
 
-# =========================
-# 页面主题：科研仪表盘风格
-# =========================
 
 RAW_CSS = """
 :root {
   --lab-ink: #1d1d1f;
   --lab-muted: #6e6e73;
   --lab-line: rgba(60, 60, 67, 0.14);
-  --lab-paper: #f5f5f7;
-  --lab-card: rgba(255, 255, 255, 0.84);
+  --lab-paper: #f6f7f9;
+  --lab-card: rgba(255, 255, 255, 0.92);
   --lab-blue: #0071e3;
   --lab-green: #248a3d;
   --lab-orange: #bf5a00;
   --lab-purple: #8944ab;
   --lab-red: #d70015;
-  --lab-shadow: 0 18px 45px rgba(0, 0, 0, 0.08);
-  --lab-shadow-strong: 0 28px 70px rgba(0, 0, 0, 0.12);
+  --lab-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+  --lab-shadow-strong: 0 16px 40px rgba(15, 23, 42, 0.10);
 }
 .bk-root, body {
   font-family: "SF Pro Display", "SF Pro Text", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif;
-  background:
-    radial-gradient(circle at 12% -8%, rgba(0, 113, 227, 0.13), transparent 34%),
-    radial-gradient(circle at 92% 2%, rgba(175, 82, 222, 0.11), transparent 30%),
-    linear-gradient(180deg, #fbfbfd 0%, #f5f5f7 48%, #f2f2f5 100%);
+  background: #f6f7f9;
   color: var(--lab-ink);
 }
 .bk-root .sidebar {
-  background: rgba(255, 255, 255, 0.78) !important;
-  backdrop-filter: blur(24px) saturate(180%);
+  background: rgba(255, 255, 255, 0.94) !important;
   border-right: 1px solid var(--lab-line);
 }
 .bk-root .main {
-  max-width: 1480px;
+  max-width: 1520px;
   margin: 0 auto;
 }
 #header,
 .app-header,
 .pn-template-header {
-  background: rgba(251, 251, 253, 0.86) !important;
+  background: rgba(255, 255, 255, 0.94) !important;
   color: var(--lab-ink) !important;
   border-bottom: 1px solid rgba(60, 60, 67, 0.12);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
-  backdrop-filter: blur(28px) saturate(180%);
+  box-shadow: 0 6px 22px rgba(15, 23, 42, 0.06);
 }
 #header a,
 .app-header a,
@@ -77,21 +71,17 @@ RAW_CSS = """
   letter-spacing: -0.02em;
 }
 .lab-hero {
-  background:
-    radial-gradient(circle at 14% 18%, rgba(255, 255, 255, 0.90), transparent 24%),
-    radial-gradient(circle at 86% 14%, rgba(0, 113, 227, 0.18), transparent 26%),
-    linear-gradient(135deg, rgba(255,255,255,0.96) 0%, rgba(244,248,255,0.92) 46%, rgba(245,245,247,0.92) 100%);
+  background: var(--lab-card);
   color: var(--lab-ink);
-  border: 1px solid rgba(255, 255, 255, 0.88);
-  border-radius: 28px;
-  padding: 30px 34px;
+  border: 1px solid rgba(60, 60, 67, 0.12);
+  border-left: 4px solid var(--lab-blue);
+  border-radius: 14px;
+  padding: 22px 26px;
   box-shadow: var(--lab-shadow-strong);
-  backdrop-filter: blur(28px) saturate(180%);
 }
 .lab-hero h1 {
   margin: 0 0 8px 0;
-  font-size: clamp(30px, 3.2vw, 46px);
-  letter-spacing: -0.03em;
+  font-size: clamp(26px, 2.4vw, 38px);
   font-weight: 820;
 }
 .lab-hero p {
@@ -102,41 +92,48 @@ RAW_CSS = """
 }
 .metric-grid, .experiment-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
 }
 .metric-card, .experiment-card {
   background: var(--lab-card);
-  backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.72);
-  border-radius: 22px;
-  padding: 16px 18px;
+  border: 1px solid rgba(60, 60, 67, 0.12);
+  border-radius: 14px;
+  padding: 14px 16px;
   box-shadow: var(--lab-shadow);
 }
 .experiment-card {
-  min-height: 154px;
+  min-height: 132px;
   transition: transform 180ms ease, box-shadow 180ms ease;
+  cursor: pointer;
 }
 .experiment-card-basic {
-  border-top: 4px solid rgba(0, 113, 227, 0.70);
+  border-top: 3px solid rgba(0, 113, 227, 0.70);
 }
 .experiment-card-coupled {
-  border-top: 4px solid rgba(175, 82, 222, 0.72);
-  background:
-    radial-gradient(circle at 90% 8%, rgba(175, 82, 222, 0.12), transparent 34%),
-    var(--lab-card);
+  border-top: 3px solid rgba(137, 68, 171, 0.72);
+  background: var(--lab-card);
 }
 .experiment-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 22px 55px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.12);
 }
-.experiment-card a {
-  color: var(--lab-blue);
-  font-weight: 700;
+.experiment-card-link {
+  color: inherit;
+  display: block;
   text-decoration: none;
 }
-.experiment-card a:hover {
-  text-decoration: underline;
+.experiment-card-link:focus .experiment-card,
+.experiment-card-link:hover .experiment-card {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.12);
+}
+.experiment-card-action {
+  color: var(--lab-blue);
+  display: inline-block;
+  font-weight: 700;
+  margin-top: 8px;
+  text-decoration: none;
 }
 .metric-name {
   color: var(--lab-muted);
@@ -146,10 +143,9 @@ RAW_CSS = """
 }
 .metric-value {
   color: var(--lab-ink);
-  font-size: 25px;
+  font-size: 24px;
   font-weight: 760;
   margin-top: 4px;
-  letter-spacing: -0.02em;
 }
 .metric-unit {
   color: var(--lab-muted);
@@ -182,20 +178,19 @@ RAW_CSS = """
   font-size: 12px;
 }
 .equation-box {
-  background: rgba(255, 255, 255, 0.86);
+  background: var(--lab-card);
   border: 1px solid var(--lab-line);
-  border-radius: 18px;
+  border-radius: 14px;
   padding: 14px 16px;
   color: var(--lab-ink);
-  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.07);
+  box-shadow: var(--lab-shadow);
 }
 .apple-panel {
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.76);
-  border-radius: 26px;
+  background: var(--lab-card);
+  border: 1px solid rgba(60, 60, 67, 0.12);
+  border-radius: 14px;
   padding: 16px;
   box-shadow: var(--lab-shadow);
-  backdrop-filter: blur(24px) saturate(180%);
 }
 .workflow-strip {
   display: grid;
@@ -203,9 +198,9 @@ RAW_CSS = """
   gap: 12px;
 }
 .workflow-item {
-  background: rgba(255,255,255,0.70);
+  background: var(--lab-card);
   border: 1px solid rgba(60,60,67,0.10);
-  border-radius: 20px;
+  border-radius: 14px;
   padding: 14px 16px;
 }
 .workflow-index {
@@ -233,39 +228,75 @@ RAW_CSS = """
   line-height: 1.55;
 }
 .plot-card {
-  background: rgba(255, 255, 255, 0.88);
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  border-radius: 26px;
-  padding: 14px;
+  background: var(--lab-card);
+  border: 1px solid rgba(60, 60, 67, 0.12);
+  border-radius: 14px;
+  padding: 12px;
   box-shadow: var(--lab-shadow);
-  backdrop-filter: blur(24px) saturate(180%);
+  overflow: hidden;
 }
-.plot-caption {
-  color: var(--lab-muted);
-  font-size: 12px;
-  margin: 2px 0 10px 5px;
+.plot-card-time {
+  min-height: 355px;
+}
+.plot-card-relation {
+  min-height: 400px;
+}
+.plot-card-history {
+  min-height: 500px;
+}
+.plot-card-single {
+  min-height: 615px;
+}
+.plot-card-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px 2px;
+}
+.plot-title {
+  color: var(--lab-ink);
+  font-size: 13px;
+  font-weight: 700;
 }
 .tab-shell {
-  background: rgba(255, 255, 255, 0.66);
-  border: 1px solid rgba(255,255,255,0.74);
-  border-radius: 28px;
+  background: var(--lab-card);
+  border: 1px solid rgba(60, 60, 67, 0.12);
+  border-radius: 16px;
   padding: 14px;
   box-shadow: var(--lab-shadow);
-  backdrop-filter: blur(22px) saturate(180%);
 }
 .bk-root .bk-btn {
-  border-radius: 999px !important;
+  border-radius: 10px !important;
   font-weight: 680 !important;
   border: 1px solid rgba(60, 60, 67, 0.12) !important;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
 }
 .bk-root .bk-input,
 .bk-root input {
-  border-radius: 12px !important;
+  border-radius: 10px !important;
 }
 .bk-root .bk-tab {
-  border-radius: 999px 999px 0 0 !important;
+  border-radius: 10px 10px 0 0 !important;
   font-weight: 680;
+}
+.nav-link-button {
+  align-items: center;
+  background: var(--lab-blue);
+  border: 1px solid rgba(0, 113, 227, 0.28);
+  border-radius: 10px;
+  box-shadow: 0 8px 18px rgba(0, 113, 227, 0.18);
+  color: white !important;
+  display: flex;
+  font-size: 14px;
+  font-weight: 720;
+  justify-content: center;
+  min-height: 38px;
+  text-decoration: none !important;
+  width: 100%;
+}
+.nav-link-button:hover {
+  background: #005bb5;
 }
 """
 pn.extension("tabulator", raw_css=[RAW_CSS])
@@ -376,8 +407,10 @@ class MonitorConfig:
     history_capacity: int = 2400
     fit_degree: int = 3
     min_fit_points: int = 10
-    plot_update_interval: int = 60
-    slow_update_interval: float = 0.55
+    plot_update_interval: int = 120
+    status_update_interval: float = 0.35
+    plot_redraw_interval: float = 1.2
+    slow_update_interval: float = 0.8
     max_process_per_frame: int = 120
     show_browser: bool = True
     server_port: int = 0
@@ -493,27 +526,34 @@ def build_pressure_port(baudrate: int = 9600, timeout: float = 0.5) -> PortConfi
     )
 
 
-# 热敏风速传感器：说明书给出的固定查询帧，地址为 0x04。
-WIND_SPEED_REQUEST = bytes.fromhex("04 03 00 00 00 02 C4 5E")
-WIND_TEMP_REQUEST = bytes.fromhex("04 05 00 00 00 02 4C 5E")
+# 热敏风速传感器：地址 0x04，连续读取风速和风温两个寄存器。
+WIND_SENSOR_REQUEST = build_read_request(0x04, 0x03, 0x0000, 0x0002)
 
 
-def parse_wind_speed_response(response: bytes) -> Mapping[str, float] | None:
+def parse_wind_response(response: bytes) -> Mapping[str, float] | None:
     if len(response) != 9 or not has_valid_crc(response):
         return None
     if response[0] != 0x04 or response[1] != 0x03 or response[2] != 0x04:
         return None
-    raw_speed = (response[5] << 8) | response[6]
-    return {"W_s": raw_speed / 10.0}
+    registers = response_registers(response)
+    if len(registers) < 2:
+        return None
+    raw_speed, raw_temperature = registers[0], registers[1]
+    return {"W_s": raw_speed / 10.0, "W_t": (raw_temperature - 400) / 10.0}
+
+
+def parse_wind_speed_response(response: bytes) -> Mapping[str, float] | None:
+    parsed = parse_wind_response(response)
+    if parsed is None:
+        return None
+    return {"W_s": parsed["W_s"]}
 
 
 def parse_wind_temp_response(response: bytes) -> Mapping[str, float] | None:
-    if len(response) != 9 or not has_valid_crc(response):
+    parsed = parse_wind_response(response)
+    if parsed is None:
         return None
-    if response[0] != 0x04 or response[1] != 0x05 or response[2] != 0x04:
-        return None
-    raw_temperature = (response[5] << 8) | response[6]
-    return {"W_t": (raw_temperature - 400) / 10.0}
+    return {"W_t": parsed["W_t"]}
 
 
 def build_wind_port(baudrate: int = 9600, timeout: float = 0.5) -> PortConfig:
@@ -522,8 +562,7 @@ def build_wind_port(baudrate: int = 9600, timeout: float = 0.5) -> PortConfig:
         baudrate=baudrate,
         timeout=timeout,
         poll_commands=(
-            PollCommand("风速", WIND_SPEED_REQUEST, 9, parse_wind_speed_response),
-            PollCommand("风温", WIND_TEMP_REQUEST, 9, parse_wind_temp_response),
+            PollCommand("风速/风温", WIND_SENSOR_REQUEST, 9, parse_wind_response),
         ),
         poll_interval=0.5,
     )
@@ -679,14 +718,14 @@ class SerialReaderThread(threading.Thread):
                     baudrate=self.config.baudrate,
                     timeout=self.config.timeout,
                 )
-                print(f"已打开串口 {self.port_name} @ {self.config.baudrate}")
+                print(f"串口打开: {self.port_name} @ {self.config.baudrate}")
                 self.last_data_time = time.monotonic()
                 if self.config.poll_commands:
                     self._run_polling_loop()
                 else:
                     self._run_line_loop()
             except Exception as exc:  # noqa: BLE001
-                print(f"连接 {self.port_name} 失败: {exc}")
+                print(f"连接失败: {self.port_name}: {exc}")
                 self._sleep_while_running(2.0)
             finally:
                 self.close_serial()
@@ -700,15 +739,15 @@ class SerialReaderThread(threading.Thread):
                     continue
                 parsed = parse_line(line, len(self.config.channels))
                 if parsed is None:
-                    print(f"忽略 {self.port_name} 异常数据: {line!r}")
+                    print(f"异常数据: {self.port_name}: {line!r}")
                     continue
                 self.last_data_time = time.monotonic()
                 self._emit_values(parsed)
             except serial.SerialException:
-                print(f"{self.port_name} 读取错误，准备重连")
+                print(f"读取错误: {self.port_name}")
                 break
             except Exception as exc:  # noqa: BLE001
-                print(f"{self.port_name} 未预期读取错误: {exc}")
+                print(f"读取异常: {self.port_name}: {exc}")
                 self._sleep_while_running(0.1)
 
     def _run_polling_loop(self) -> None:
@@ -725,7 +764,7 @@ class SerialReaderThread(threading.Thread):
                     if parsed is None:
                         self._warn_if_idle()
                         if response:
-                            print(f"忽略 {self.port_name} 异常{command.label}响应: {response.hex(' ')}")
+                            print(f"异常响应: {self.port_name} {command.label}: {response.hex(' ')}")
                         continue
                     sample.update(parsed)
                     self.last_data_time = time.monotonic()
@@ -734,10 +773,10 @@ class SerialReaderThread(threading.Thread):
                     self._emit_values([sample[channel] for channel in self.config.channels])
                 self._sleep_while_running(self.config.poll_interval)
             except serial.SerialException:
-                print(f"{self.port_name} 轮询错误，准备重连")
+                print(f"轮询错误: {self.port_name}")
                 break
             except Exception as exc:  # noqa: BLE001
-                print(f"{self.port_name} 未预期轮询错误: {exc}")
+                print(f"轮询异常: {self.port_name}: {exc}")
                 self._sleep_while_running(0.1)
 
     def _emit_values(self, values: Sequence[float]) -> None:
@@ -776,7 +815,7 @@ class SerialReaderThread(threading.Thread):
             self.last_data_time = now
             return
         if now - self.last_data_time >= 5.0:
-            print(f"{self.port_name} 已 {now - self.last_data_time:.0f}s 未收到数据 @ {self.config.baudrate} baud")
+            print(f"{self.port_name} 无数据 {now - self.last_data_time:.0f}s")
             self.last_data_time = now
 
 
@@ -793,7 +832,7 @@ class SerialManager:
             reader = SerialReaderThread(port_name, port_config, self.data_queue)
             reader.start()
             self.readers[port_name] = reader
-            print(f"启动 {port_name}: {list(port_config.channels)}")
+            print(f"启动: {port_name} {list(port_config.channels)}")
 
     def stop_all(self) -> None:
         for reader in self.readers.values():
@@ -951,6 +990,7 @@ class MonitorApp:
         self.last_status_refresh = 0.0
         self.last_plot_refresh = 0.0
         self.last_slow_refresh = 0.0
+        self.refreshing_views = False
         self.last_sample_monotonic: float | None = None
 
         self.samples: deque[dict[str, object]] = deque(maxlen=config.history_capacity)
@@ -965,7 +1005,7 @@ class MonitorApp:
         self.start_button = pn.widgets.Button(name="开始采集", button_type="primary")
         self.stop_button = pn.widgets.Button(name="停止采集", button_type="light")
         self.pause_toggle = pn.widgets.Toggle(name="暂停记录", button_type="warning", value=False)
-        self.autoscale_checkbox = pn.widgets.Checkbox(name="自动缩放坐标", value=True)
+        self.autoscale_checkbox = pn.widgets.Checkbox(name="视图跟随数据", value=False)
         self.time_window_slider = pn.widgets.IntSlider(
             name="实时窗口 / s",
             start=10,
@@ -976,6 +1016,7 @@ class MonitorApp:
         self.fit_degree_spinner = pn.widgets.IntInput(name="多项式阶数", value=config.fit_degree, start=1, end=6)
         self.fit_button = pn.widgets.Button(name="计算拟合", button_type="primary")
         self.clear_fit_button = pn.widgets.Button(name="清除拟合", button_type="light")
+        self.refresh_plot_button = pn.widgets.Button(name="重置当前视图", button_type="primary")
         self.clear_data_button = pn.widgets.Button(name="清空本轮数据", button_type="danger")
         self.export_button = pn.widgets.Button(name="导出 CSV", button_type="success")
         self.stop_button.disabled = True
@@ -984,9 +1025,30 @@ class MonitorApp:
         self.summary_pane = pn.pane.HTML(sizing_mode="stretch_width")
         self.latest_pane = pn.pane.HTML(sizing_mode="stretch_width")
         self.equation_pane = pn.pane.HTML(sizing_mode="stretch_width")
-        self.time_panes: dict[str, pn.pane.HoloViews] = {}
-        self.relation_panes: dict[str, pn.pane.HoloViews] = {}
-        self.history_pane = pn.pane.HoloViews(height=430, sizing_mode="stretch_width")
+        self.time_panes: dict[str, pn.pane.Bokeh] = {}
+        self.relation_panes: dict[str, pn.pane.Bokeh] = {}
+        self.time_figures = {}
+        self.relation_figures = {}
+        self.relation_sources: dict[str, dict[str, ColumnDataSource]] = {}
+        self.time_sources: dict[str, ColumnDataSource] = {}
+        self.history_figure = None
+        self.history_sources: dict[str, ColumnDataSource] = {}
+        self.history_fit_sources: dict[str, ColumnDataSource] = {}
+        self.history_pane = pn.pane.Bokeh(height=430, sizing_mode="stretch_width")
+        self.single_plot_options = self._build_single_plot_options()
+        self.single_plot_select = pn.widgets.Select(
+            name="图表",
+            options=self.single_plot_options,
+            value=next(iter(self.single_plot_options.values())),
+            sizing_mode="stretch_width",
+        )
+        self.single_plot_figure = None
+        self.single_plot_kind = ""
+        self.single_plot_axis_id = ""
+        self.single_sources: dict[str, ColumnDataSource] = {}
+        self.single_fit_sources: dict[str, ColumnDataSource] = {}
+        self.single_plot_pane = pn.pane.Bokeh(height=540, sizing_mode="stretch_width")
+        self.content_tabs: pn.Tabs | None = None
         self.data_table = pn.widgets.Tabulator(
             pd.DataFrame(),
             pagination="local",
@@ -1002,12 +1064,14 @@ class MonitorApp:
         self.start_button.on_click(self._on_start_collection)
         self.stop_button.on_click(self._on_stop_collection)
         self.pause_toggle.param.watch(self._on_pause_toggle, "value")
-        self.autoscale_checkbox.param.watch(lambda _event: self._refresh_views(force=True), "value")
-        self.time_window_slider.param.watch(lambda _event: self._refresh_views(force=True), "value")
+        self.autoscale_checkbox.param.watch(lambda _event: self._reset_active_view(), "value")
+        self.time_window_slider.param.watch(lambda _event: self._reset_active_view(), "value")
         self.fit_button.on_click(self._on_fit)
         self.clear_fit_button.on_click(self._on_clear_fit)
+        self.refresh_plot_button.on_click(lambda _event: self._reset_active_view())
         self.clear_data_button.on_click(self._on_clear_data)
         self.export_button.on_click(self._on_export)
+        self.single_plot_select.param.watch(lambda _event: self._rebuild_single_plot(), "value")
 
     def _collect_channels(self) -> set[str]:
         channels = {"elapsed"}
@@ -1036,6 +1100,15 @@ class MonitorApp:
             titles.setdefault(series.y_channel, series.label)
             colors.setdefault(series.y_channel, series.color)
         return titles, units, colors
+
+    def _build_single_plot_options(self) -> dict[str, str]:
+        options: dict[str, str] = {}
+        for plot in self.config.time_plots:
+            options[f"实时 · {plot.title}"] = f"time:{plot.axis_id}"
+        for plot in self.config.relation_plots:
+            options[f"关系 · {plot.title}"] = f"relation:{plot.axis_id}"
+        options[f"拟合 · {self.config.history_plot.title}"] = f"history:{self.config.history_plot.axis_id}"
+        return options
 
     def start(self) -> None:
         if self.collecting:
@@ -1073,6 +1146,17 @@ class MonitorApp:
                 start=True,
             )
         pn.state.on_session_destroyed(lambda _session_context: self.shutdown())
+        self._clear_plot_models()
+        self.content_tabs = pn.Tabs(
+            ("实时曲线", self._build_time_grid()),
+            ("关系与拟合", self._build_relation_fit_layout()),
+            ("单图查看", self._build_single_plot_layout()),
+            ("数据表", self._build_table_layout()),
+            dynamic=False,
+            tabs_location="above",
+            sizing_mode="stretch_width",
+        )
+        self.content_tabs.param.watch(lambda _event: self._refresh_active_tab(force=True), "active")
         return pn.template.FastListTemplate(
             title=self.config.title,
             header_background="#fbfbfd",
@@ -1085,8 +1169,8 @@ class MonitorApp:
                     self.stop_button,
                     self.pause_toggle,
                     self.autoscale_checkbox,
+                    self.refresh_plot_button,
                     self.time_window_slider,
-                    pn.pane.Markdown("打开页面不会占用串口；点击开始采集后才连接硬件。"),
                     css_classes=["apple-panel"],
                     sizing_mode="stretch_width",
                 ),
@@ -1105,7 +1189,7 @@ class MonitorApp:
                     css_classes=["apple-panel"],
                     sizing_mode="stretch_width",
                 ),
-                pn.pane.HTML('<a href="/" target="_self">返回实验目录</a>'),
+                pn.pane.HTML('<a class="nav-link-button" href="/" target="_self">返回目录</a>', sizing_mode="stretch_width"),
             ],
             main=[
                 self._build_hero(),
@@ -1116,14 +1200,7 @@ class MonitorApp:
                     sizing_mode="stretch_width",
                 ),
                 pn.Column(
-                    pn.Tabs(
-                        ("实时曲线", self._build_time_grid()),
-                        ("关系图与拟合", self._build_relation_fit_layout()),
-                        ("数据表", self._build_table_layout()),
-                        dynamic=True,
-                        tabs_location="above",
-                        sizing_mode="stretch_width",
-                    ),
+                    self.content_tabs,
                     css_classes=["tab-shell"],
                     sizing_mode="stretch_width",
                 ),
@@ -1146,16 +1223,46 @@ class MonitorApp:
             sizing_mode="stretch_width",
         )
 
+    def _make_view_button(self, plot_key: str) -> pn.widgets.Button:
+        button = pn.widgets.Button(name="查看", button_type="light", width=60, height=32)
+        button.on_click(lambda _event, key=plot_key: self._open_single_plot(key))
+        return button
+
+    def _make_plot_header(self, title: str, plot_key: str) -> pn.Row:
+        return pn.Row(
+            pn.pane.HTML(f'<div class="plot-title">{html.escape(title)}</div>', sizing_mode="stretch_width"),
+            self._make_view_button(plot_key),
+            css_classes=["plot-card-header"],
+            sizing_mode="stretch_width",
+        )
+
+    def _clear_plot_models(self) -> None:
+        self.time_panes.clear()
+        self.relation_panes.clear()
+        self.time_figures = {}
+        self.relation_figures = {}
+        self.time_sources.clear()
+        self.relation_sources.clear()
+        self.history_figure = None
+        self.history_sources.clear()
+        self.history_fit_sources.clear()
+        self.single_plot_figure = None
+        self.single_plot_kind = ""
+        self.single_plot_axis_id = ""
+        self.single_sources.clear()
+        self.single_fit_sources.clear()
+
     def _build_time_grid(self) -> pn.GridBox:
         cards = []
         for plot in self.config.time_plots:
-            pane = pn.pane.HoloViews(self._make_time_plot(plot), height=285, sizing_mode="stretch_width")
+            figure_model = self._create_time_plot(plot, width=520, height=285)
+            pane = pn.pane.Bokeh(figure_model, height=285, sizing_mode="stretch_width")
             self.time_panes[plot.axis_id] = pane
             cards.append(
                 pn.Column(
-                    pn.pane.HTML(f'<div class="plot-caption">{html.escape(plot.title)}：可独立缩放、拖拽、框选和保存</div>'),
+                    self._make_plot_header(plot.title, f"time:{plot.axis_id}"),
                     pane,
-                    css_classes=["plot-card"],
+                    css_classes=["plot-card", "plot-card-time"],
                     sizing_mode="stretch_width",
                 )
             )
@@ -1164,18 +1271,19 @@ class MonitorApp:
     def _build_relation_fit_layout(self) -> pn.Column:
         relation_items = []
         for relation_plot in self.config.relation_plots:
-            pane = pn.pane.HoloViews(self._make_relation_plot(relation_plot), height=330, sizing_mode="stretch_width")
+            figure_model = self._create_relation_plot(relation_plot, width=520, height=330)
+            pane = pn.pane.Bokeh(figure_model, height=330, sizing_mode="stretch_width")
             self.relation_panes[relation_plot.axis_id] = pane
             relation_items.append(
                 pn.Column(
-                    pn.pane.HTML(
-                        f'<div class="plot-caption">{html.escape(relation_plot.title)}：每张图独立交互</div>'
-                    ),
+                    self._make_plot_header(relation_plot.title, f"relation:{relation_plot.axis_id}"),
                     pane,
-                    css_classes=["plot-card"],
+                    css_classes=["plot-card", "plot-card-relation"],
                     sizing_mode="stretch_width",
                 )
             )
+        self.history_figure = self._create_history_plot(width=900, height=430)
+        self.history_pane.object = self.history_figure
         return pn.Column(
             pn.pane.HTML('<div class="section-title">变量关系</div>'),
             pn.GridBox(
@@ -1185,21 +1293,287 @@ class MonitorApp:
             ),
             pn.pane.HTML('<div class="section-title">历史拟合</div>'),
             pn.Column(
-                pn.pane.HTML('<div class="plot-caption">历史拟合：独立缩放、拖拽、框选和保存</div>'),
+                self._make_plot_header(self.config.history_plot.title, f"history:{self.config.history_plot.axis_id}"),
                 self.history_pane,
-                css_classes=["plot-card"],
+                css_classes=["plot-card", "plot-card-history"],
                 sizing_mode="stretch_width",
             ),
             self.equation_pane,
             sizing_mode="stretch_width",
         )
 
+    def _build_single_plot_layout(self) -> pn.Column:
+        self._rebuild_single_plot()
+        return pn.Column(
+            self.single_plot_select,
+            pn.Column(
+                self.single_plot_pane,
+                css_classes=["plot-card", "plot-card-single"],
+                sizing_mode="stretch_width",
+            ),
+            sizing_mode="stretch_width",
+        )
+
     def _build_table_layout(self) -> pn.Column:
         return pn.Column(
-            pn.pane.Markdown("最近 200 条同步样本。导出按钮会保存完整缓存数据。"),
+            pn.pane.Markdown("最近样本"),
             self.data_table,
             sizing_mode="stretch_width",
         )
+
+    def _open_single_plot(self, plot_key: str) -> None:
+        self.single_plot_select.value = plot_key
+        self._rebuild_single_plot()
+        if self.content_tabs is not None:
+            self.content_tabs.active = 2
+
+    def _new_figure(
+        self,
+        *,
+        title: str,
+        x_label: str,
+        y_label: str,
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+        width: int,
+        height: int,
+    ):
+        fig = figure(
+            title=title,
+            width=width,
+            height=height,
+            x_range=Range1d(*x_range),
+            y_range=Range1d(*y_range),
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+            toolbar_location="above",
+            sizing_mode="stretch_width",
+        )
+        fig.xaxis.axis_label = x_label
+        fig.yaxis.axis_label = y_label
+        fig.background_fill_color = "#ffffff"
+        fig.grid.grid_line_alpha = 0.35
+        fig.title.text_font_size = "12pt"
+        fig.xaxis.axis_label_text_font_size = "10pt"
+        fig.yaxis.axis_label_text_font_size = "10pt"
+        wheel_zoom = fig.select_one(WheelZoomTool)
+        if wheel_zoom is not None:
+            fig.toolbar.active_scroll = wheel_zoom
+        return fig
+
+    def _create_time_plot(self, plot: TimePlotConfig, width: int, height: int):
+        source = ColumnDataSource(data={"x": [], "y": []})
+        x_range = (0.0, max(1.0, float(self.time_window_slider.value)))
+        fig = self._new_figure(
+            title=plot.title,
+            x_label="实验时间 t (s)",
+            y_label=plot.y_label,
+            x_range=x_range,
+            y_range=plot.y_range,
+            width=width,
+            height=height,
+        )
+        fig.line("x", "y", source=source, color=plot.color, line_width=2.4)
+        fig.add_tools(
+            HoverTool(
+                tooltips=[
+                    ("t", "@x{0.00} s"),
+                    (plot.title, "@y{0.000}"),
+                ],
+                mode="mouse",
+            )
+        )
+        self.time_sources[plot.axis_id] = source
+        self.time_figures[plot.axis_id] = fig
+        self._update_time_source(plot, reset_view=True)
+        return fig
+
+    def _create_relation_plot(self, plot: RelationPlotConfig, width: int, height: int):
+        fig = self._new_figure(
+            title=plot.title,
+            x_label=plot.x_label,
+            y_label=plot.y_label,
+            x_range=plot.x_range,
+            y_range=plot.y_range,
+            width=width,
+            height=height,
+        )
+        sources: dict[str, ColumnDataSource] = {}
+        for series in plot.series:
+            source = ColumnDataSource(data={"x": [], "y": []})
+            fig.scatter(
+                "x",
+                "y",
+                source=source,
+                color=series.color,
+                size=series.marker_size,
+                alpha=series.alpha,
+                legend_label=series.label,
+            )
+            sources[series.y_channel] = source
+        fig.add_tools(HoverTool(tooltips=[("x", "@x{0.000}"), ("y", "@y{0.000}")], mode="mouse"))
+        if len(plot.series) > 1:
+            fig.legend.location = "top_left"
+            fig.legend.click_policy = "hide"
+        self.relation_sources[plot.axis_id] = sources
+        self.relation_figures[plot.axis_id] = fig
+        self._update_relation_sources(plot, reset_view=True)
+        return fig
+
+    def _create_history_plot(self, width: int, height: int):
+        history_plot = self.config.history_plot
+        x_range = history_plot.x_range or (0.0, max(1.0, float(self.time_window_slider.value)))
+        fig = self._new_figure(
+            title=history_plot.title,
+            x_label=history_plot.x_label,
+            y_label=history_plot.y_label,
+            x_range=x_range,
+            y_range=history_plot.y_range,
+            width=width,
+            height=height,
+        )
+        self.history_figure = fig
+        self.history_sources.clear()
+        self.history_fit_sources.clear()
+        for series in history_plot.series:
+            sample_source = ColumnDataSource(data={"x": [], "y": []})
+            fit_source = ColumnDataSource(data={"x": [], "y": []})
+            fig.scatter(
+                "x",
+                "y",
+                source=sample_source,
+                color=series.color,
+                size=series.marker_size,
+                alpha=series.marker_alpha,
+                legend_label=f"{series.label} 样本",
+            )
+            fig.line(
+                "x",
+                "y",
+                source=fit_source,
+                color=series.color,
+                line_width=series.line_width,
+                legend_label=f"{series.label} 拟合",
+            )
+            self.history_sources[series.y_channel] = sample_source
+            self.history_fit_sources[series.y_channel] = fit_source
+        fig.add_tools(HoverTool(tooltips=[("x", "@x{0.000}"), ("y", "@y{0.000}")], mode="mouse"))
+        if len(history_plot.series) > 1:
+            fig.legend.location = "top_left"
+            fig.legend.click_policy = "hide"
+        self._update_history_sources(reset_view=True)
+        return fig
+
+    def _rebuild_single_plot(self) -> None:
+        value = str(self.single_plot_select.value)
+        if ":" not in value:
+            return
+        kind, axis_id = value.split(":", 1)
+        self.single_plot_kind = kind
+        self.single_plot_axis_id = axis_id
+        self.single_sources.clear()
+        self.single_fit_sources.clear()
+        if kind == "time":
+            plot = next((item for item in self.config.time_plots if item.axis_id == axis_id), None)
+            if plot is None:
+                return
+            self.single_plot_figure = self._create_single_time_plot(plot)
+        elif kind == "relation":
+            plot = next((item for item in self.config.relation_plots if item.axis_id == axis_id), None)
+            if plot is None:
+                return
+            self.single_plot_figure = self._create_single_relation_plot(plot)
+        else:
+            self.single_plot_figure = self._create_single_history_plot()
+        self.single_plot_pane.object = self.single_plot_figure
+
+    def _create_single_time_plot(self, plot: TimePlotConfig):
+        source = ColumnDataSource(data={"x": [], "y": []})
+        fig = self._new_figure(
+            title=plot.title,
+            x_label="实验时间 t (s)",
+            y_label=plot.y_label,
+            x_range=(0.0, max(1.0, float(self.time_window_slider.value))),
+            y_range=plot.y_range,
+            width=1040,
+            height=540,
+        )
+        fig.line("x", "y", source=source, color=plot.color, line_width=2.4)
+        fig.add_tools(HoverTool(tooltips=[("t", "@x{0.00} s"), (plot.title, "@y{0.000}")], mode="mouse"))
+        self.single_plot_figure = fig
+        self.single_sources[plot.channel] = source
+        self._update_single_plot_sources(reset_view=True)
+        return fig
+
+    def _create_single_relation_plot(self, plot: RelationPlotConfig):
+        fig = self._new_figure(
+            title=plot.title,
+            x_label=plot.x_label,
+            y_label=plot.y_label,
+            x_range=plot.x_range,
+            y_range=plot.y_range,
+            width=1040,
+            height=540,
+        )
+        self.single_plot_figure = fig
+        for series in plot.series:
+            source = ColumnDataSource(data={"x": [], "y": []})
+            fig.scatter(
+                "x",
+                "y",
+                source=source,
+                color=series.color,
+                size=series.marker_size,
+                alpha=series.alpha,
+                legend_label=series.label,
+            )
+            self.single_sources[series.y_channel] = source
+        fig.add_tools(HoverTool(tooltips=[("x", "@x{0.000}"), ("y", "@y{0.000}")], mode="mouse"))
+        if len(plot.series) > 1:
+            fig.legend.location = "top_left"
+            fig.legend.click_policy = "hide"
+        self._update_single_plot_sources(reset_view=True)
+        return fig
+
+    def _create_single_history_plot(self):
+        history_plot = self.config.history_plot
+        fig = self._new_figure(
+            title=history_plot.title,
+            x_label=history_plot.x_label,
+            y_label=history_plot.y_label,
+            x_range=history_plot.x_range or (0.0, max(1.0, float(self.time_window_slider.value))),
+            y_range=history_plot.y_range,
+            width=1040,
+            height=540,
+        )
+        self.single_plot_figure = fig
+        for series in history_plot.series:
+            sample_source = ColumnDataSource(data={"x": [], "y": []})
+            fit_source = ColumnDataSource(data={"x": [], "y": []})
+            fig.scatter(
+                "x",
+                "y",
+                source=sample_source,
+                color=series.color,
+                size=series.marker_size,
+                alpha=series.marker_alpha,
+                legend_label=f"{series.label} 样本",
+            )
+            fig.line(
+                "x",
+                "y",
+                source=fit_source,
+                color=series.color,
+                line_width=series.line_width,
+                legend_label=f"{series.label} 拟合",
+            )
+            self.single_sources[series.y_channel] = sample_source
+            self.single_fit_sources[series.y_channel] = fit_source
+        fig.add_tools(HoverTool(tooltips=[("x", "@x{0.000}"), ("y", "@y{0.000}")], mode="mouse"))
+        if len(history_plot.series) > 1:
+            fig.legend.location = "top_left"
+            fig.legend.click_policy = "hide"
+        self._update_single_plot_sources(reset_view=True)
+        return fig
 
     def _on_start_collection(self, _event) -> None:
         self.start()
@@ -1229,7 +1603,7 @@ class MonitorApp:
         if self.history_manager.calculate_fit(degree, self.config.min_fit_points):
             self.fit_status = f"{degree} 阶拟合"
         else:
-            self.fit_status = "拟合失败：样本不足或自变量重复"
+            self.fit_status = "拟合失败"
         self._refresh_views(force=True)
 
     def _on_clear_fit(self, _event) -> None:
@@ -1285,8 +1659,12 @@ class MonitorApp:
             return
 
         if self._process_pending_packets():
-            self._refresh_fast_views()
-            self.last_plot_refresh = now
+            if now - self.last_status_refresh >= self.config.status_update_interval:
+                self._refresh_live_status()
+                self.last_status_refresh = now
+            if now - self.last_plot_refresh >= self.config.plot_redraw_interval:
+                self._sync_active_plot_data()
+                self.last_plot_refresh = now
             if now - self.last_slow_refresh >= self.config.slow_update_interval:
                 self._refresh_slow_views()
                 self.last_slow_refresh = now
@@ -1364,27 +1742,228 @@ class MonitorApp:
         channels.extend(channel for channel in self.display_channels if channel not in channels)
         return unique_preserve_order(channels)
 
+    def _set_range(self, figure_model, x_range: tuple[float, float], y_range: tuple[float, float] | None = None) -> None:
+        if figure_model is None:
+            return
+        x_start, x_end = x_range
+        if np.isfinite(x_start) and np.isfinite(x_end) and not np.isclose(x_start, x_end):
+            figure_model.x_range.start = float(x_start)
+            figure_model.x_range.end = float(x_end)
+        if y_range is not None:
+            y_start, y_end = y_range
+            if np.isfinite(y_start) and np.isfinite(y_end) and not np.isclose(y_start, y_end):
+                figure_model.y_range.start = float(y_start)
+                figure_model.y_range.end = float(y_end)
+
+    def _time_plot_arrays(self, plot: TimePlotConfig) -> tuple[np.ndarray, np.ndarray]:
+        x_values = np.asarray(self.timestamps, dtype=np.float64)
+        y_values = np.asarray(self.channel_data.get(plot.channel, []), dtype=np.float64)
+        return downsample_pair(x_values, y_values, self.config.time_render_points)
+
+    def _time_plot_ranges(
+        self,
+        plot: TimePlotConfig,
+        x_values: np.ndarray,
+        y_values: np.ndarray,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        if len(x_values) == 0:
+            return (0.0, max(1.0, float(self.time_window_slider.value))), plot.y_range
+        window = float(self.time_window_slider.value)
+        x_max = float(x_values[-1])
+        x_min = max(0.0, x_max - window)
+        mask = x_values >= x_min
+        y_window = y_values[mask] if len(y_values) == len(x_values) else y_values
+        return (x_min, max(x_max, x_min + 1.0)), auto_limits([y_window], plot.y_range)
+
+    def _update_time_source(self, plot: TimePlotConfig, reset_view: bool = False) -> None:
+        source = self.time_sources.get(plot.axis_id)
+        if source is None:
+            return
+        x_values, y_values = self._time_plot_arrays(plot)
+        source.data = {"x": x_values, "y": y_values}
+        if reset_view or self.autoscale_checkbox.value:
+            self._set_range(self.time_figures.get(plot.axis_id), *self._time_plot_ranges(plot, x_values, y_values))
+
+    def _relation_series_arrays(self, series: RelationSeriesConfig) -> tuple[np.ndarray, np.ndarray]:
+        x_values = np.asarray(self.channel_data.get(series.x_channel, []), dtype=np.float64)[-series.max_points :]
+        y_values = np.asarray(self.channel_data.get(series.y_channel, []), dtype=np.float64)[-series.max_points :]
+        return downsample_pair(x_values, y_values, series.max_points)
+
+    def _relation_ranges(self, plot: RelationPlotConfig) -> tuple[tuple[float, float], tuple[float, float]]:
+        x_samples: list[np.ndarray] = []
+        y_samples: list[np.ndarray] = []
+        for series in plot.series:
+            x_values, y_values = self._relation_series_arrays(series)
+            if len(x_values) > 0:
+                x_samples.append(x_values)
+                y_samples.append(y_values)
+        x_range = auto_limits(x_samples, plot.x_range) if plot.auto_scale_x else plot.x_range
+        y_range = auto_limits(y_samples, plot.y_range) if plot.auto_scale_y else plot.y_range
+        return x_range, y_range
+
+    def _update_relation_sources(self, plot: RelationPlotConfig, reset_view: bool = False) -> None:
+        sources = self.relation_sources.get(plot.axis_id, {})
+        for series in plot.series:
+            source = sources.get(series.y_channel)
+            if source is None:
+                continue
+            x_values, y_values = self._relation_series_arrays(series)
+            source.data = {"x": x_values, "y": y_values}
+        if reset_view or self.autoscale_checkbox.value:
+            self._set_range(self.relation_figures.get(plot.axis_id), *self._relation_ranges(plot))
+
+    def _history_ranges(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        history_plot = self.config.history_plot
+        x_values, _y_values = self.history_manager.get_plot_data()
+        x_range = history_plot.x_range or (0.0, max(1.0, float(self.time_window_slider.value)))
+        if len(x_values) > 0 and history_plot.auto_scale_x:
+            x_range = auto_limits([x_values], x_range)
+        return x_range, history_plot.y_range
+
+    def _update_history_sources(self, reset_view: bool = False) -> None:
+        history_plot = self.config.history_plot
+        x_values, y_values = self.history_manager.get_plot_data()
+        for series in history_plot.series:
+            sample_source = self.history_sources.get(series.y_channel)
+            if sample_source is not None:
+                y_series = y_values.get(series.y_channel, np.asarray([], dtype=np.float64))
+                x_plot, y_plot = downsample_pair(x_values, y_series, history_plot.max_points)
+                sample_source.data = {"x": x_plot, "y": y_plot}
+        fit_x, fit_curves = self.history_manager.get_fit_curves(history_plot.fit_points)
+        for series in history_plot.series:
+            fit_source = self.history_fit_sources.get(series.y_channel)
+            if fit_source is None:
+                continue
+            fit_y = fit_curves.get(series.y_channel) if fit_x is not None else None
+            fit_source.data = {
+                "x": np.asarray([], dtype=np.float64) if fit_x is None else fit_x,
+                "y": np.asarray([], dtype=np.float64) if fit_y is None else fit_y,
+            }
+        if reset_view or self.autoscale_checkbox.value:
+            self._set_range(self.history_figure, *self._history_ranges())
+
+    def _update_single_plot_sources(self, reset_view: bool = False) -> None:
+        kind = self.single_plot_kind
+        axis_id = self.single_plot_axis_id
+        if kind == "time":
+            plot = next((item for item in self.config.time_plots if item.axis_id == axis_id), None)
+            if plot is None:
+                return
+            source = self.single_sources.get(plot.channel)
+            if source is None:
+                return
+            x_values, y_values = self._time_plot_arrays(plot)
+            source.data = {"x": x_values, "y": y_values}
+            if reset_view or self.autoscale_checkbox.value:
+                self._set_range(self.single_plot_figure, *self._time_plot_ranges(plot, x_values, y_values))
+        elif kind == "relation":
+            plot = next((item for item in self.config.relation_plots if item.axis_id == axis_id), None)
+            if plot is None:
+                return
+            for series in plot.series:
+                source = self.single_sources.get(series.y_channel)
+                if source is None:
+                    continue
+                x_values, y_values = self._relation_series_arrays(series)
+                source.data = {"x": x_values, "y": y_values}
+            if reset_view or self.autoscale_checkbox.value:
+                self._set_range(self.single_plot_figure, *self._relation_ranges(plot))
+        elif kind == "history":
+            history_plot = self.config.history_plot
+            x_values, y_values = self.history_manager.get_plot_data()
+            for series in history_plot.series:
+                sample_source = self.single_sources.get(series.y_channel)
+                if sample_source is not None:
+                    y_series = y_values.get(series.y_channel, np.asarray([], dtype=np.float64))
+                    x_plot, y_plot = downsample_pair(x_values, y_series, history_plot.max_points)
+                    sample_source.data = {"x": x_plot, "y": y_plot}
+            fit_x, fit_curves = self.history_manager.get_fit_curves(history_plot.fit_points)
+            for series in history_plot.series:
+                fit_source = self.single_fit_sources.get(series.y_channel)
+                if fit_source is None:
+                    continue
+                fit_y = fit_curves.get(series.y_channel) if fit_x is not None else None
+                fit_source.data = {
+                    "x": np.asarray([], dtype=np.float64) if fit_x is None else fit_x,
+                    "y": np.asarray([], dtype=np.float64) if fit_y is None else fit_y,
+                }
+            if reset_view or self.autoscale_checkbox.value:
+                self._set_range(self.single_plot_figure, *self._history_ranges())
+
     def _refresh_views(self, force: bool = False) -> None:
         self._refresh_status_cards()
         self._refresh_latest_cards()
-        self._refresh_time_plots(force=force)
-        self._refresh_relation_plots(force=force)
-        self._refresh_history_plot()
-        self._refresh_equations()
-        self._refresh_table()
+        self._refresh_active_tab(force=force)
 
-    def _refresh_fast_views(self) -> None:
-        # 高频刷新只更新读数和实时曲线，保证页面帧率。
+    def _refresh_live_status(self) -> None:
         self._refresh_status_cards()
         self._refresh_latest_cards()
-        self._refresh_time_plots()
 
     def _refresh_slow_views(self) -> None:
-        # 低频刷新关系图、拟合图、表格和公式区，兼顾速度与稳定性。
-        self._refresh_relation_plots()
-        self._refresh_history_plot()
-        self._refresh_equations()
-        self._refresh_table()
+        active = self._active_tab_index()
+        if active == 3:
+            self._refresh_table()
+        elif active == 1:
+            self._refresh_equations()
+
+    def _active_tab_index(self) -> int:
+        if self.content_tabs is None:
+            return 0
+        return int(self.content_tabs.active or 0)
+
+    def _sync_active_plot_data(self) -> None:
+        active = self._active_tab_index()
+        if active == 0:
+            self._refresh_time_plots()
+        elif active == 1:
+            self._refresh_relation_plots()
+            self._refresh_history_plot()
+        elif active == 2:
+            self._refresh_single_plot()
+
+    def _refresh_active_tab(self, force: bool = False) -> None:
+        if self.refreshing_views:
+            return
+        self.refreshing_views = True
+        try:
+            self._refresh_active_tab_unlocked(force=force)
+        finally:
+            self.refreshing_views = False
+
+    def _refresh_active_tab_unlocked(self, force: bool = False) -> None:
+        active = self._active_tab_index()
+        if active == 0:
+            self._refresh_time_plots(force=force)
+        elif active == 1:
+            self._refresh_relation_plots(force=force)
+            self._refresh_history_plot()
+            self._refresh_equations()
+        elif active == 2:
+            self._refresh_single_plot(force=True)
+        elif active == 3:
+            self._refresh_table()
+
+    def _reset_active_view(self) -> None:
+        active = self._active_tab_index()
+        if active == 0:
+            for plot in self.config.time_plots:
+                source = self.time_sources.get(plot.axis_id)
+                if source is None:
+                    continue
+                self._set_range(
+                    self.time_figures.get(plot.axis_id),
+                    *self._time_plot_ranges(
+                        plot,
+                        np.asarray(source.data.get("x", []), dtype=np.float64),
+                        np.asarray(source.data.get("y", []), dtype=np.float64),
+                    ),
+                )
+        elif active == 1:
+            for plot in self.config.relation_plots:
+                self._set_range(self.relation_figures.get(plot.axis_id), *self._relation_ranges(plot))
+            self._set_range(self.history_figure, *self._history_ranges())
+        elif active == 2:
+            self._update_single_plot_sources(reset_view=True)
 
     def _refresh_status_cards(self) -> None:
         now = time.monotonic()
@@ -1400,7 +1979,12 @@ class MonitorApp:
             status = "数据延迟"
         else:
             status = "实时采集"
-        export_text = str(self.last_export_path) if self.last_export_path else "未导出"
+        export_text = (
+            f'<div style="margin-top: 8px;"><span class="status-pill">导出: '
+            f"{html.escape(str(self.last_export_path))}</span></div>"
+            if self.last_export_path
+            else ""
+        )
         self.summary_pane.object = f"""
         <div class="metric-grid">
           <div class="metric-card"><div class="metric-name">状态</div><div class="metric-value">{html.escape(status)}</div></div>
@@ -1410,16 +1994,12 @@ class MonitorApp:
           <div class="metric-card"><div class="metric-name">队列</div><div class="metric-value">{self.data_queue.qsize()}</div></div>
           <div class="metric-card"><div class="metric-name">拟合/导出</div><div class="metric-value" style="font-size: 15px;">{html.escape(self.fit_status)}</div></div>
         </div>
-        <div style="margin-top: 8px;">
-          <span class="status-pill">暂停丢弃: {self.paused_drop_count}</span>
-          <span class="status-pill">缓存上限: {self.config.history_capacity}</span>
-          <span class="status-pill">导出: {html.escape(export_text)}</span>
-        </div>
+        {export_text}
         """
 
     def _refresh_latest_cards(self) -> None:
         if not self.latest_values:
-            message = "点击“开始采集”后打开串口" if not self.collecting else "等待串口数据..."
+            message = "未采集" if not self.collecting else "等待数据"
             self.latest_pane.object = f"""
             <div class="metric-card">
               <div class="metric-name">实时读数</div>
@@ -1446,23 +2026,24 @@ class MonitorApp:
         self.latest_pane.object = f'<div class="metric-grid">{"".join(cards)}</div>'
 
     def _refresh_time_plots(self, force: bool = False) -> None:
-        if not force and not self.time_panes:
+        if not force and not self.time_sources:
             return
         for plot in self.config.time_plots:
-            pane = self.time_panes.get(plot.axis_id)
-            if pane is not None:
-                pane.object = self._make_time_plot(plot)
+            self._update_time_source(plot, reset_view=False)
 
     def _refresh_relation_plots(self, force: bool = False) -> None:
-        if not force and not self.relation_panes:
+        if not force and not self.relation_sources:
             return
         for plot in self.config.relation_plots:
-            pane = self.relation_panes.get(plot.axis_id)
-            if pane is not None:
-                pane.object = self._make_relation_plot(plot)
+            self._update_relation_sources(plot, reset_view=False)
 
     def _refresh_history_plot(self) -> None:
-        self.history_pane.object = self._make_history_plot()
+        self._update_history_sources(reset_view=False)
+
+    def _refresh_single_plot(self, force: bool = False, allowed_kinds: set[str] | None = None) -> None:
+        if allowed_kinds is not None and self.single_plot_kind not in allowed_kinds and not force:
+            return
+        self._update_single_plot_sources(reset_view=False)
 
     def _refresh_equations(self) -> None:
         rows = []
@@ -1477,7 +2058,7 @@ class MonitorApp:
         fit_time = self.history_manager.last_fit_time or "未计算"
         self.equation_pane.object = f"""
         <div class="equation-box">
-          <div><b>拟合模型</b>：多项式最小二乘，当前状态：{html.escape(self.fit_status)}，最后拟合：{html.escape(fit_time)}</div>
+          <div><b>拟合模型</b>：{html.escape(self.fit_status)} | {html.escape(fit_time)}</div>
           {''.join(rows)}
         </div>
         """
@@ -1488,7 +2069,7 @@ class MonitorApp:
             df[column] = df[column].round(4)
         self.data_table.value = df
 
-    def _make_time_plot(self, plot: TimePlotConfig):
+    def _make_time_plot(self, plot: TimePlotConfig, width: int = 520, height: int = 285):
         x_values = np.asarray(self.timestamps, dtype=np.float64)
         y_values = np.asarray(self.channel_data.get(plot.channel, []), dtype=np.float64)
         x_values, y_values = downsample_pair(x_values, y_values, self.config.time_render_points)
@@ -1523,14 +2104,14 @@ class MonitorApp:
             ylabel=plot.y_label,
             xlim=(x_min, max(x_max, x_min + 1.0)),
             ylim=y_lim,
-            width=520,
-            height=285,
+            width=width,
+            height=height,
             show_grid=True,
             bgcolor="#ffffff",
             fontsize={"title": 12, "labels": 10, "ticks": 9},
         )
 
-    def _make_relation_plot(self, plot: RelationPlotConfig):
+    def _make_relation_plot(self, plot: RelationPlotConfig, width: int = 520, height: int = 330):
         elements = []
         x_samples: list[np.ndarray] = []
         y_samples: list[np.ndarray] = []
@@ -1567,8 +2148,8 @@ class MonitorApp:
             ylabel=plot.y_label,
             xlim=x_lim,
             ylim=y_lim,
-            width=520,
-            height=330,
+            width=width,
+            height=height,
             show_grid=True,
             bgcolor="#ffffff",
             legend_position="right",
@@ -1579,7 +2160,7 @@ class MonitorApp:
             fontsize={"title": 12, "labels": 10, "ticks": 9},
         )
 
-    def _make_history_plot(self):
+    def _make_history_plot(self, width: int = 900, height: int = 430):
         history_plot = self.config.history_plot
         x_values, y_values = self.history_manager.get_plot_data()
         elements = []
@@ -1636,8 +2217,8 @@ class MonitorApp:
             ylabel=history_plot.y_label,
             xlim=x_lim,
             ylim=history_plot.y_range,
-            width=900,
-            height=430,
+            width=width,
+            height=height,
             show_grid=True,
             bgcolor="#ffffff",
             legend_position="right",
@@ -1835,6 +2416,8 @@ def pressure_wind_config() -> MonitorConfig:
         export_dir="exports/pressure_wind",
         status_label="同步样本",
         discarded_label="丢弃样本",
+        sync_timeout=1.5,
+        max_sync_diff=0.45,
         experiment_note="用于风速-压力响应曲线、稳态判据和压力标定拟合。",
     )
 
@@ -1961,12 +2544,14 @@ def make_portal_view() -> pn.template.FastListTemplate:
             )
             cards.append(
                 f"""
-                <div class="{card_class}">
-                  <div class="metric-name">{html.escape(experiment.key)}</div>
-                  <div class="metric-value" style="font-size: 20px;">{html.escape(experiment.name)}</div>
-                  <div style="min-height: 28px;">{port_badges}</div>
-                  <a href="/{html.escape(experiment.key)}" target="_self">进入实验页面</a>
-                </div>
+                <a class="experiment-card-link" href="/{html.escape(experiment.key)}" target="_self">
+                  <div class="{card_class}">
+                    <div class="metric-name">{html.escape(experiment.key)}</div>
+                    <div class="metric-value" style="font-size: 20px;">{html.escape(experiment.name)}</div>
+                    <div style="min-height: 28px;">{port_badges}</div>
+                    <span class="experiment-card-action">进入实验</span>
+                  </div>
+                </a>
                 """
             )
         cards.append("</div>")
@@ -1981,7 +2566,7 @@ def make_portal_view() -> pn.template.FastListTemplate:
                 """
                 <div class="lab-hero">
                   <h1>平板引射器实验平台</h1>
-                  <p>实时采集、交互图表、拟合分析与 CSV 导出。</p>
+                  <p>实时采集 · 拟合分析 · CSV 导出</p>
                 </div>
                 """,
                 sizing_mode="stretch_width",
@@ -2002,16 +2587,21 @@ def print_experiment_list() -> None:
 
 
 def run_debug_checks() -> int:
-    print("开始执行单文件全量 debug 检查...")
+    print("debug 检查...")
     for experiment in EXPERIMENTS:
-        print(f"检查: {experiment.key} - {experiment.name}")
+        print(f"{experiment.key}: {experiment.name}")
         app = MonitorApp(replace(experiment.config, show_browser=False, server_port=0))
-        for time_plot in experiment.config.time_plots:
-            hv.render(app._make_time_plot(time_plot), backend="bokeh")
-        for relation_plot in experiment.config.relation_plots:
-            hv.render(app._make_relation_plot(relation_plot), backend="bokeh")
-        hv.render(app._make_history_plot(), backend="bokeh")
-    print("全量 debug 检查通过：配置、采集对象、Panel 实例化、HoloViews 渲染均正常。")
+        app.view()
+        sample = {channel: 1.0 for channel in app._collect_channels() if channel != "elapsed"}
+        if "T_a" in sample:
+            sample.pop("T_a", None)
+        app._record_sample(sample)
+        for active in range(4):
+            if app.content_tabs is not None:
+                app.content_tabs.active = active
+            app._refresh_active_tab(force=True)
+            app._reset_active_view()
+    print("debug 检查通过")
     return 0
 
 
