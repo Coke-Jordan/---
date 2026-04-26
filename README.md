@@ -1,6 +1,4 @@
-# 实验平台说明书
-面向高热流密度电子器件的集成式微型气体压缩泵-平板引射器矩阵散热系统研究实验平台
-
+# 平板引射器实验平台使用说明书
 
 ## 目录
 
@@ -43,6 +41,14 @@
 FE\.venv\Scripts\python.exe FE\ejector_lab.py
 ```
 
+安装或更新依赖也应使用虚拟环境中的 pip：
+
+```powershell
+FE\.venv\Scripts\python.exe -m pip install -r FE\requirements.txt
+```
+
+不要直接执行全局 `pip install ...`，避免依赖安装到系统 Python。
+
 如果终端已经显示 `(.venv)`，也可以运行：
 
 ```powershell
@@ -60,6 +66,14 @@ FE\.venv\Scripts\python.exe FE\ejector_lab.py
 ```
 
 启动后在浏览器中选择实验类型。门户页先显示基础实验，再显示耦合实验。
+
+启动 Linux 风格页面副本：
+
+```powershell
+FE\.venv\Scripts\python.exe FE\ejector_lab_linux.py
+```
+
+该副本复用同一套采集、拟合和导出逻辑，仅更换页面主题。
 
 直接进入指定实验：
 
@@ -214,6 +228,7 @@ CSV 编码为 `utf-8-sig`，可直接用 Excel 打开。
 ```text
 FE/
 ├─ ejector_lab.py        主程序
+├─ ejector_lab_linux.py  Linux 风格页面副本
 ├─ 使用说明书.md         本说明书
 ├─ exports/              数据导出目录
 └─ .venv/                Python 虚拟环境
