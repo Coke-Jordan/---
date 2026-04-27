@@ -22,6 +22,7 @@ import panel as pn
 import serial
 from bokeh.models import ColumnDataSource, HoverTool, Range1d, WheelZoomTool
 from bokeh.plotting import figure
+from serial.tools import list_ports
 
 hv.extension("bokeh")
 
@@ -334,6 +335,27 @@ body {
   margin: 2px 6px 2px 0;
   font-size: 12px;
   font-weight: 650;
+}
+.port-map {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+.port-line {
+  background: rgba(120, 120, 128, 0.10);
+  border-radius: 12px;
+  color: var(--ios-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+.port-line strong {
+  color: var(--ios-label);
+  font-weight: 720;
+}
+.port-warning {
+  color: var(--ios-orange);
+  font-weight: 700;
 }
 .equation-box {
   background: var(--ios-card-solid);
@@ -980,6 +1002,41 @@ def unique_preserve_order(values: Iterable[str]) -> list[str]:
     return ordered
 
 
+def serial_port_sort_key(port_name: str) -> tuple[str, int, str]:
+    match = re.fullmatch(r"([A-Za-z]+)(\d+)", str(port_name).strip())
+    if match:
+        return match.group(1).upper(), int(match.group(2)), str(port_name).upper()
+    return str(port_name).upper(), 10**9, str(port_name).upper()
+
+
+def detect_serial_ports() -> dict[str, str]:
+    detected: dict[str, str] = {}
+    try:
+        ports = list(list_ports.comports())
+    except Exception:  # noqa: BLE001
+        return detected
+    for port in sorted(ports, key=lambda item: serial_port_sort_key(item.device)):
+        description = (port.description or "").strip()
+        if description and description != "n/a":
+            detected[port.device] = f"{port.device} - {description}"
+        else:
+            detected[port.device] = port.device
+    return detected
+
+
+def merge_port_configs(base: PortConfig, extra: PortConfig, port_name: str) -> PortConfig:
+    if base.baudrate != extra.baudrate:
+        raise ValueError(f"{port_name} 不能同时用于不同波特率模块")
+    channels = tuple(unique_preserve_order((*base.channels, *extra.channels)))
+    return PortConfig(
+        channels=channels,
+        baudrate=base.baudrate,
+        timeout=max(base.timeout, extra.timeout),
+        poll_commands=(*base.poll_commands, *extra.poll_commands),
+        poll_interval=min(base.poll_interval, extra.poll_interval),
+    )
+
+
 class SerialReaderThread(threading.Thread):
     """每个串口一个后台线程，避免页面刷新阻塞采集。"""
 
@@ -1342,6 +1399,11 @@ class MonitorApp:
             height=360,
             disabled=True,
         )
+        self.detected_port_labels = detect_serial_ports()
+        self.refresh_ports_button = pn.widgets.Button(name="刷新端口", button_type="light")
+        self.port_status_pane = pn.pane.HTML(sizing_mode="stretch_width")
+        self.port_selectors = self._build_port_selectors()
+        self._refresh_port_status()
         self._wire_callbacks()
         self._refresh_views(force=True)
 
@@ -1357,6 +1419,103 @@ class MonitorApp:
         self.clear_data_button.on_click(self._on_clear_data)
         self.export_button.on_click(self._on_export)
         self.single_plot_select.param.watch(lambda _event: self._rebuild_single_plot(), "value")
+        self.refresh_ports_button.on_click(self._on_refresh_ports)
+        for selector in self.port_selectors.values():
+            selector.param.watch(lambda _event: self._refresh_port_status(), "value")
+
+    def _build_port_selectors(self) -> dict[str, pn.widgets.Select]:
+        selectors: dict[str, pn.widgets.Select] = {}
+        for default_port, port_config in self.config.ports.items():
+            preferred_port = self._preferred_port(default_port)
+            selectors[default_port] = pn.widgets.Select(
+                name=f"{default_port} · {', '.join(port_config.channels)}",
+                options=self._port_options(default_port, preferred_port),
+                value=preferred_port,
+                sizing_mode="stretch_width",
+            )
+        return selectors
+
+    def _preferred_port(self, default_port: str) -> str:
+        detected_ports = list(self.detected_port_labels)
+        if default_port in self.detected_port_labels:
+            return default_port
+        if len(self.config.ports) == 1 and detected_ports:
+            return detected_ports[0]
+        return default_port
+
+    def _port_options(self, default_port: str, current_port: str | None = None) -> dict[str, str]:
+        ports = set(self.detected_port_labels)
+        ports.add(default_port)
+        if current_port:
+            ports.add(current_port)
+        ordered_ports = sorted(ports, key=serial_port_sort_key)
+        options: dict[str, str] = {}
+        for port in ordered_ports:
+            label = self.detected_port_labels.get(port, port)
+            if port == default_port and port not in self.detected_port_labels:
+                label = f"{port} - 默认端口"
+            options[label] = port
+        return options
+
+    def _selected_port_map(self) -> dict[str, str]:
+        return {
+            default_port: str(selector.value or default_port).strip()
+            for default_port, selector in self.port_selectors.items()
+        }
+
+    def _effective_port_configs(self) -> dict[str, PortConfig]:
+        effective_ports: dict[str, PortConfig] = {}
+        selected_ports = self._selected_port_map()
+        for default_port, port_config in self.config.ports.items():
+            selected_port = selected_ports.get(default_port, default_port)
+            if not selected_port:
+                raise ValueError("请选择有效串口")
+            if selected_port in effective_ports:
+                effective_ports[selected_port] = merge_port_configs(
+                    effective_ports[selected_port],
+                    port_config,
+                    selected_port,
+                )
+            else:
+                effective_ports[selected_port] = port_config
+        return effective_ports
+
+    def _refresh_port_options(self) -> None:
+        self.detected_port_labels = detect_serial_ports()
+        for default_port, selector in self.port_selectors.items():
+            current_port = str(selector.value or self._preferred_port(default_port))
+            selector.options = self._port_options(default_port, current_port)
+            selector.value = current_port if current_port in selector.options.values() else self._preferred_port(default_port)
+        self._refresh_port_status()
+
+    def _refresh_port_status(self) -> None:
+        selected_ports = self._selected_port_map() if hasattr(self, "port_selectors") else {}
+        detected_count = len(self.detected_port_labels)
+        lines = [
+            f'<div class="port-line"><strong>识别端口</strong>：{detected_count} 个</div>',
+        ]
+        for default_port, selected_port in selected_ports.items():
+            port_config = self.config.ports[default_port]
+            detected_label = self.detected_port_labels.get(selected_port)
+            state = "已识别" if detected_label else "未识别"
+            channels = ", ".join(port_config.channels)
+            lines.append(
+                f'<div class="port-line"><strong>{html.escape(default_port)}</strong>'
+                f' → {html.escape(selected_port)} · {html.escape(channels)} · {state}</div>'
+            )
+        try:
+            self._effective_port_configs()
+        except ValueError as exc:
+            lines.append(f'<div class="port-line port-warning">{html.escape(str(exc))}</div>')
+        self.port_status_pane.object = f'<div class="port-map">{"".join(lines)}</div>'
+
+    def _set_port_controls_disabled(self, disabled: bool) -> None:
+        self.refresh_ports_button.disabled = disabled
+        for selector in self.port_selectors.values():
+            selector.disabled = disabled
+
+    def _on_refresh_ports(self, _event) -> None:
+        self._refresh_port_options()
 
     def _collect_channels(self) -> set[str]:
         channels = {"elapsed"}
@@ -1395,16 +1554,29 @@ class MonitorApp:
         options[f"拟合 · {self.config.history_plot.title}"] = f"history:{self.config.history_plot.axis_id}"
         return options
 
-    def start(self) -> None:
+    def start(self) -> bool:
         if self.collecting:
-            return
+            return True
+        try:
+            effective_ports = self._effective_port_configs()
+        except ValueError as exc:
+            self.fit_status = str(exc)
+            self._refresh_port_status()
+            self._refresh_status_cards()
+            return False
+        self.serial_manager.stop_all()
+        self.serial_manager = SerialManager(effective_ports, self.data_queue)
+        self.sync_manager = SyncManager(effective_ports.keys(), self.config.sync_timeout, self.config.max_sync_diff)
         self.collecting = True
         self.last_sample_monotonic = None
         self.sync_manager.buffer.clear()
         self.serial_manager.start_all()
         self.fit_status = "采集中"
+        self._set_port_controls_disabled(True)
+        self._refresh_port_status()
         self._refresh_status_cards()
         self._refresh_latest_cards()
+        return True
 
     def stop(self) -> None:
         self.collecting = False
@@ -1413,6 +1585,8 @@ class MonitorApp:
         self.sync_manager.buffer.clear()
         self._discard_pending_packets()
         self.fit_status = "采集已停止"
+        self._set_port_controls_disabled(False)
+        self._refresh_port_status()
         self._refresh_status_cards()
         self._refresh_latest_cards()
 
@@ -1463,6 +1637,14 @@ class MonitorApp:
                     self.autoscale_checkbox,
                     self.refresh_plot_button,
                     self.time_window_slider,
+                    css_classes=["apple-panel"],
+                    sizing_mode="stretch_width",
+                ),
+                pn.Column(
+                    pn.pane.Markdown("### 端口设置"),
+                    self.refresh_ports_button,
+                    *self.port_selectors.values(),
+                    self.port_status_pane,
                     css_classes=["apple-panel"],
                     sizing_mode="stretch_width",
                 ),
@@ -1879,7 +2061,8 @@ class MonitorApp:
         return fig
 
     def _on_start_collection(self, _event) -> None:
-        self.start()
+        if not self.start():
+            return
         self.start_button.disabled = True
         self.stop_button.disabled = False
         self.pause_toggle.disabled = False
@@ -1892,6 +2075,7 @@ class MonitorApp:
         self.start_button.disabled = False
         self.stop_button.disabled = True
         self.pause_toggle.disabled = True
+        self._set_port_controls_disabled(False)
         self.start_button.button_type = "primary"
         self.stop_button.button_type = "warning"
         self._refresh_status_cards()
