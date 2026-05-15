@@ -614,7 +614,7 @@ class PollCommand:
     request: bytes
     response_length: int
     parser: Callable[[bytes], Mapping[str, float] | None]
-    delay_after_write: float = 0.15
+    delay_after_write: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -786,6 +786,8 @@ PRESSURE_RANGE_KPA = (-100.0, 300.0)
 PRESSURE_ADC_RANGE = (0.0, 65535.0)
 PRESSURE_VOLTAGE_RANGE = (0.0, 5.0)
 PRESSURE_REGISTER_INDEX = {"P1": 2, "P2": 4}
+TARGET_SAMPLE_RATE_HZ = 800.0
+TARGET_SAMPLE_INTERVAL_SECONDS = 1.0 / TARGET_SAMPLE_RATE_HZ
 
 
 def raw_count_to_pressure_kpa(raw_count: int) -> float:
@@ -823,38 +825,60 @@ def build_pressure_port(baudrate: int = 9600, timeout: float = 0.5) -> PortConfi
                 parser=parse_pressure_response,
             ),
         ),
-        poll_interval=0.25,
+        poll_interval=TARGET_SAMPLE_INTERVAL_SECONDS,
     )
 
 
-# 热敏风速传感器：地址 0x04，连续读取风速和风温两个寄存器。
-WIND_SENSOR_REQUEST = build_read_request(0x04, 0x03, 0x0000, 0x0002)
+# 热敏风速传感器：按冠拓电子 485 输出说明书读取。
+# 注意 0x05 在该设备上是厂家自定义温度读数帧，不按标准 Modbus 写线圈语义处理。
+WIND_SENSOR_ADDRESS = 0x04
+WIND_REGISTER_START = 0x0000
+WIND_REGISTER_COUNT = 0x0002
+WIND_RESPONSE_LENGTH = 9
+WIND_READ_DELAY_SECONDS = 0.0
+WIND_POLL_INTERVAL_SECONDS = TARGET_SAMPLE_INTERVAL_SECONDS
+WIND_SPEED_SCALE = 10.0
+WIND_TEMPERATURE_OFFSET = 400.0
+WIND_TEMPERATURE_SCALE = 10.0
+WIND_SPEED_REQUEST = build_read_request(
+    WIND_SENSOR_ADDRESS,
+    0x03,
+    WIND_REGISTER_START,
+    WIND_REGISTER_COUNT,
+)
+WIND_TEMPERATURE_REQUEST = build_read_request(
+    WIND_SENSOR_ADDRESS,
+    0x05,
+    WIND_REGISTER_START,
+    WIND_REGISTER_COUNT,
+)
 
 
-def parse_wind_response(response: bytes) -> Mapping[str, float] | None:
-    if len(response) != 9 or not has_valid_crc(response):
+def wind_response_registers(response: bytes, function: int) -> list[int] | None:
+    if len(response) != WIND_RESPONSE_LENGTH or not has_valid_crc(response):
         return None
-    if response[0] != 0x04 or response[1] != 0x03 or response[2] != 0x04:
+    if response[0] != WIND_SENSOR_ADDRESS or response[1] != function or response[2] != 0x04:
         return None
     registers = response_registers(response)
     if len(registers) < 2:
         return None
-    raw_speed, raw_temperature = registers[0], registers[1]
-    return {"W_s": raw_speed / 10.0, "W_t": (raw_temperature - 400) / 10.0}
+    return registers
 
 
 def parse_wind_speed_response(response: bytes) -> Mapping[str, float] | None:
-    parsed = parse_wind_response(response)
-    if parsed is None:
+    registers = wind_response_registers(response, 0x03)
+    if registers is None:
         return None
-    return {"W_s": parsed["W_s"]}
+    raw_speed = registers[1]
+    return {"W_s": raw_speed / WIND_SPEED_SCALE}
 
 
 def parse_wind_temp_response(response: bytes) -> Mapping[str, float] | None:
-    parsed = parse_wind_response(response)
-    if parsed is None:
+    registers = wind_response_registers(response, 0x05)
+    if registers is None:
         return None
-    return {"W_t": parsed["W_t"]}
+    raw_temperature = registers[1]
+    return {"W_t": (raw_temperature - WIND_TEMPERATURE_OFFSET) / WIND_TEMPERATURE_SCALE}
 
 
 def build_wind_port(baudrate: int = 9600, timeout: float = 0.5) -> PortConfig:
@@ -863,9 +887,22 @@ def build_wind_port(baudrate: int = 9600, timeout: float = 0.5) -> PortConfig:
         baudrate=baudrate,
         timeout=timeout,
         poll_commands=(
-            PollCommand("风速/风温", WIND_SENSOR_REQUEST, 9, parse_wind_response),
+            PollCommand(
+                "风速",
+                WIND_SPEED_REQUEST,
+                WIND_RESPONSE_LENGTH,
+                parse_wind_speed_response,
+                delay_after_write=WIND_READ_DELAY_SECONDS,
+            ),
+            PollCommand(
+                "温度",
+                WIND_TEMPERATURE_REQUEST,
+                WIND_RESPONSE_LENGTH,
+                parse_wind_temp_response,
+                delay_after_write=WIND_READ_DELAY_SECONDS,
+            ),
         ),
-        poll_interval=0.5,
+        poll_interval=WIND_POLL_INTERVAL_SECONDS,
     )
 
 
@@ -906,10 +943,10 @@ def build_thermocouple_port(baudrate: int = 38400, timeout: float = 0.5) -> Port
                 request=build_read_request(0x01, 0x03, 0x0003, 0x0003),
                 response_length=11,
                 parser=parse_thermocouple_response,
-                delay_after_write=0.08,
+                delay_after_write=0.0,
             ),
         ),
-        poll_interval=0.25,
+        poll_interval=TARGET_SAMPLE_INTERVAL_SECONDS,
     )
 
 
@@ -1088,13 +1125,15 @@ class SerialReaderThread(threading.Thread):
 
     def _run_polling_loop(self) -> None:
         while self.running and self.serial_conn is not None:
+            cycle_started = time.monotonic()
             sample: dict[str, float] = {}
             try:
                 for command in self.config.poll_commands:
                     self.serial_conn.reset_input_buffer()
                     self.serial_conn.write(command.request)
                     self.serial_conn.flush()
-                    time.sleep(command.delay_after_write)
+                    if command.delay_after_write > 0:
+                        time.sleep(command.delay_after_write)
                     response = self.serial_conn.read(command.response_length)
                     parsed = command.parser(response)
                     if parsed is None:
@@ -1107,7 +1146,8 @@ class SerialReaderThread(threading.Thread):
 
                 if all(channel in sample for channel in self.config.channels):
                     self._emit_values([sample[channel] for channel in self.config.channels])
-                self._sleep_while_running(self.config.poll_interval)
+                elapsed = time.monotonic() - cycle_started
+                self._sleep_while_running(max(0.0, self.config.poll_interval - elapsed))
             except serial.SerialException:
                 print(f"轮询错误: {self.port_name}")
                 break
@@ -2562,12 +2602,12 @@ def wind_config() -> MonitorConfig:
         ports={"COM5": build_wind_port()},
         time_plots=(
             TimePlotConfig("ws", "W_s", "风速 W_s", "#248a3d", "风速 (m/s)", wind_range),
-            TimePlotConfig("wt", "W_t", "风温 W_t", "#d70015", "温度 (C)", temp_range),
+            TimePlotConfig("wt", "W_t", "温度 W_t", "#d70015", "温度 (C)", temp_range),
         ),
         relation_plots=(
             RelationPlotConfig(
                 "rel",
-                "风温-风速关系",
+                "温度-风速关系",
                 "W_s (m/s)",
                 "W_t (C)",
                 wind_range,
@@ -2582,7 +2622,7 @@ def wind_config() -> MonitorConfig:
             "W_s",
             "风速 W_s (m/s)",
             "温度 W_t (C)",
-            "风温关于风速的实验拟合",
+            "温度关于风速的实验拟合",
             temp_range,
             wind_range,
             (HistorySeriesConfig("W_t", "W_t", "#af52de"),),
@@ -2591,7 +2631,7 @@ def wind_config() -> MonitorConfig:
             fit_points=100,
         ),
         export_dir="exports/wind_only",
-        experiment_note="用于风速传感器响应测试、环境温漂观察和风速-温度耦合分析。",
+        experiment_note="用于风速传感器响应测试、温度通道观察和风速-温度耦合分析。",
     )
 
 
@@ -2646,7 +2686,7 @@ def pressure_wind_config() -> MonitorConfig:
             TimePlotConfig("p1", "P1", "P1 压力", "#0071e3", "压力 (kPa)", pressure_range),
             TimePlotConfig("p2", "P2", "P2 压力", "#bf5a00", "压力 (kPa)", pressure_range),
             TimePlotConfig("ws", "W_s", "风速 W_s", "#248a3d", "风速 (m/s)", wind_range),
-            TimePlotConfig("wt", "W_t", "风温 W_t", "#d70015", "温度 (C)", temp_range),
+            TimePlotConfig("wt", "W_t", "温度 W_t", "#d70015", "温度 (C)", temp_range),
         ),
         relation_plots=(
             RelationPlotConfig(
@@ -2746,7 +2786,7 @@ def pressure_temperature_config() -> MonitorConfig:
 
 EXPERIMENTS: tuple[ExperimentSpec, ...] = (
     ExperimentSpec("pressure", "压力单变量实验", "基础实验", "COM11 采集 P1/P2，两路压力时序与同步关系。", pressure_config()),
-    ExperimentSpec("wind", "风速单变量实验", "基础实验", "COM5 采集 W_s/W_t，风速响应与环境温漂。", wind_config()),
+    ExperimentSpec("wind", "风速单变量实验", "基础实验", "COM5 采集 W_s/W_t，风速响应与温度通道变化。", wind_config()),
     ExperimentSpec("temperature", "温度单变量实验", "基础实验", "COM7 采集 K 型热电偶 T1/T2，热响应与一致性。", temperature_config()),
     ExperimentSpec("pressure_wind", "压力-风速耦合实验", "耦合实验", "同步压力与风速，拟合 P=f(W_s)。", pressure_wind_config()),
     ExperimentSpec("pressure_temperature", "压力-温度耦合实验", "耦合实验", "同步压力与平均温度，拟合 P=f(T_a)。", pressure_temperature_config()),
