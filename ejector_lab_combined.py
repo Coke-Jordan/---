@@ -702,8 +702,8 @@ class MonitorConfig:
     queue_size: int = 1000
     sync_timeout: float = 0.5
     max_sync_diff: float = 0.1
-    max_time_points: int = 500
-    time_render_points: int = 240
+    max_time_points: int = 0
+    time_render_points: int = 1200
     time_window_seconds: float = 180.0
     history_capacity: int = 2400
     fit_degree: int = 3
@@ -996,7 +996,12 @@ def downsample_pair(x_values: np.ndarray, y_values: np.ndarray, max_points: int)
     if max_points <= 0 or len(x_values) <= max_points:
         return x_values, y_values
     step = max(1, int(np.ceil(len(x_values) / max_points)))
-    return x_values[::step], y_values[::step]
+    x_sampled = x_values[::step]
+    y_sampled = y_values[::step]
+    if x_sampled[-1] != x_values[-1]:
+        x_sampled = np.append(x_sampled, x_values[-1])
+        y_sampled = np.append(y_sampled, y_values[-1])
+    return x_sampled, y_sampled
 
 
 def auto_limits(values: list[np.ndarray], fallback: tuple[float, float], margin_ratio: float = 0.10) -> tuple[float, float]:
@@ -1372,11 +1377,14 @@ class MonitorApp:
         self.refreshing_views = False
         self.last_sample_monotonic: float | None = None
 
+        self.time_capacity = (
+            None if config.max_time_points <= 0 else max(config.max_time_points, config.history_capacity)
+        )
         self.samples: deque[dict[str, object]] = deque(maxlen=config.history_capacity)
         self.latest_values: dict[str, float] = {}
-        self.timestamps: deque[float] = deque(maxlen=config.max_time_points)
+        self.timestamps: deque[float] = deque(maxlen=self.time_capacity)
         self.channel_data = {
-            channel: deque(maxlen=config.max_time_points) for channel in self._collect_channels()
+            channel: deque(maxlen=self.time_capacity) for channel in self._collect_channels()
         }
         self.channel_titles, self.channel_units, self.channel_colors = self._build_channel_metadata()
         self.display_channels = unique_preserve_order([plot.channel for plot in config.time_plots])
@@ -1832,15 +1840,18 @@ class MonitorApp:
         return (float(min(y_starts)), float(max(y_ends)))
 
     def _create_combined_time_plot(self, width: int, height: int):
+        y_range = self._combined_time_y_range()
         fig = self._new_figure(
             title="实时曲线总览",
             x_label="实验时间 t (s)",
             y_label="采集值（按图例区分单位）",
             x_range=(0.0, max(1.0, float(self.time_window_slider.value))),
-            y_range=self._combined_time_y_range(),
+            y_range=y_range,
             width=width,
             height=height,
         )
+        fig.x_range.bounds = (0.0, 1_000_000_000.0)
+        fig.y_range.bounds = y_range
         self.time_figure = fig
         self.time_sources.clear()
         for plot in self.config.time_plots:
@@ -2140,20 +2151,8 @@ class MonitorApp:
         default_y_range = self._combined_time_y_range()
         if len(x_values) == 0:
             return default_x_range, default_y_range
-        window = float(self.time_window_slider.value)
         x_max = float(x_values[-1])
-        x_min = max(0.0, x_max - window)
-        mask = x_values >= x_min
-        y_samples: list[np.ndarray] = []
-        for plot in self.config.time_plots:
-            y_values = np.asarray(self.channel_data.get(plot.channel, []), dtype=np.float64)
-            if len(y_values) == 0:
-                continue
-            if len(y_values) == len(x_values):
-                y_samples.append(y_values[mask])
-            else:
-                y_samples.append(y_values)
-        return (x_min, max(x_max, x_min + 1.0)), auto_limits(y_samples, default_y_range)
+        return (0.0, max(x_max, default_x_range[1])), default_y_range
 
     def _update_all_time_sources(self, reset_view: bool = False) -> None:
         for plot in self.config.time_plots:
@@ -2386,17 +2385,15 @@ class MonitorApp:
         y_values = np.asarray(self.channel_data.get(plot.channel, []), dtype=np.float64)
         x_values, y_values = downsample_pair(x_values, y_values, self.config.time_render_points)
         if len(x_values) > 0:
-            window = float(self.time_window_slider.value)
             x_max = float(x_values[-1])
-            x_min = max(0.0, x_max - window)
-            mask = x_values >= x_min
-            x_plot = x_values[mask]
-            y_plot = y_values[mask]
+            x_min = 0.0
+            x_plot = x_values
+            y_plot = y_values
         else:
             x_min, x_max = 0.0, max(1.0, float(self.time_window_slider.value))
             x_plot = np.asarray([], dtype=np.float64)
             y_plot = np.asarray([], dtype=np.float64)
-        y_lim = auto_limits([y_plot], plot.y_range) if self.autoscale_checkbox.value else plot.y_range
+        y_lim = plot.y_range
         return hv.Curve(
             (x_plot, y_plot),
             kdims=[("elapsed", "实验时间 t (s)")],
@@ -2414,7 +2411,7 @@ class MonitorApp:
             title=plot.title,
             xlabel="实验时间 t (s)",
             ylabel=plot.y_label,
-            xlim=(x_min, max(x_max, x_min + 1.0)),
+            xlim=(x_min, max(x_max, float(self.time_window_slider.value), x_min + 1.0)),
             ylim=y_lim,
             width=width,
             height=height,
