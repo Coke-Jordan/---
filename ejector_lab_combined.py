@@ -786,8 +786,8 @@ PRESSURE_RANGE_KPA = (-100.0, 300.0)
 PRESSURE_ADC_RANGE = (0.0, 65535.0)
 PRESSURE_VOLTAGE_RANGE = (0.0, 5.0)
 PRESSURE_REGISTER_INDEX = {"P1": 2, "P2": 4}
-TARGET_SAMPLE_RATE_HZ = 800.0
-TARGET_SAMPLE_INTERVAL_SECONDS = 1.0 / TARGET_SAMPLE_RATE_HZ
+FASTEST_POLL_INTERVAL_SECONDS = 0.0
+SERIAL_FRAME_BITS_PER_BYTE = 10.0
 
 
 def raw_count_to_pressure_kpa(raw_count: int) -> float:
@@ -825,7 +825,7 @@ def build_pressure_port(baudrate: int = 9600, timeout: float = 0.5) -> PortConfi
                 parser=parse_pressure_response,
             ),
         ),
-        poll_interval=TARGET_SAMPLE_INTERVAL_SECONDS,
+        poll_interval=FASTEST_POLL_INTERVAL_SECONDS,
     )
 
 
@@ -836,10 +836,16 @@ WIND_REGISTER_START = 0x0000
 WIND_REGISTER_COUNT = 0x0002
 WIND_RESPONSE_LENGTH = 9
 WIND_READ_DELAY_SECONDS = 0.0
-WIND_POLL_INTERVAL_SECONDS = TARGET_SAMPLE_INTERVAL_SECONDS
+WINDTEST_DEFAULT_INTERVAL_SECONDS = 0.1
+WIND_POLL_INTERVAL_SECONDS = WINDTEST_DEFAULT_INTERVAL_SECONDS
 WIND_SPEED_SCALE = 10.0
 WIND_TEMPERATURE_OFFSET = 400.0
 WIND_TEMPERATURE_SCALE = 10.0
+WIND_SPEED_RAW_BYTE_INDEX = 6
+WIND_TEMPERATURE_RAW_HIGH_BYTE_INDEX = 5
+WIND_TEMPERATURE_RAW_LOW_BYTE_INDEX = 6
+WIND_SPEED_RANGE_MPS = (0.0, 15.0)
+WIND_TEMPERATURE_RANGE_C = (0.0, 80.0)
 WIND_SPEED_REQUEST = build_read_request(
     WIND_SENSOR_ADDRESS,
     0x03,
@@ -854,31 +860,36 @@ WIND_TEMPERATURE_REQUEST = build_read_request(
 )
 
 
-def wind_response_registers(response: bytes, function: int) -> list[int] | None:
+def has_valid_wind_response(response: bytes, function: int) -> bool:
     if len(response) != WIND_RESPONSE_LENGTH or not has_valid_crc(response):
-        return None
+        return False
     if response[0] != WIND_SENSOR_ADDRESS or response[1] != function or response[2] != 0x04:
-        return None
-    registers = response_registers(response)
-    if len(registers) < 2:
-        return None
-    return registers
+        return False
+    return True
+
+
+def raw_wind_speed_to_mps(raw_speed: int) -> float:
+    return raw_speed / WIND_SPEED_SCALE
+
+
+def raw_wind_temperature_to_celsius(raw_temperature: int) -> float:
+    return (raw_temperature - WIND_TEMPERATURE_OFFSET) / WIND_TEMPERATURE_SCALE
 
 
 def parse_wind_speed_response(response: bytes) -> Mapping[str, float] | None:
-    registers = wind_response_registers(response, 0x03)
-    if registers is None:
+    if not has_valid_wind_response(response, 0x03):
         return None
-    raw_speed = registers[1]
-    return {"W_s": raw_speed / WIND_SPEED_SCALE}
+    raw_speed = response[WIND_SPEED_RAW_BYTE_INDEX]
+    return {"W_s": raw_wind_speed_to_mps(raw_speed)}
 
 
 def parse_wind_temp_response(response: bytes) -> Mapping[str, float] | None:
-    registers = wind_response_registers(response, 0x05)
-    if registers is None:
+    if not has_valid_wind_response(response, 0x05):
         return None
-    raw_temperature = registers[1]
-    return {"W_t": (raw_temperature - WIND_TEMPERATURE_OFFSET) / WIND_TEMPERATURE_SCALE}
+    raw_temperature = (
+        response[WIND_TEMPERATURE_RAW_HIGH_BYTE_INDEX] << 8
+    ) | response[WIND_TEMPERATURE_RAW_LOW_BYTE_INDEX]
+    return {"W_t": raw_wind_temperature_to_celsius(raw_temperature)}
 
 
 def build_wind_port(baudrate: int = 9600, timeout: float = 0.5) -> PortConfig:
@@ -946,7 +957,7 @@ def build_thermocouple_port(baudrate: int = 38400, timeout: float = 0.5) -> Port
                 delay_after_write=0.0,
             ),
         ),
-        poll_interval=TARGET_SAMPLE_INTERVAL_SECONDS,
+        poll_interval=FASTEST_POLL_INTERVAL_SECONDS,
     )
 
 
@@ -1074,6 +1085,32 @@ def merge_port_configs(base: PortConfig, extra: PortConfig, port_name: str) -> P
         poll_commands=(*base.poll_commands, *extra.poll_commands),
         poll_interval=min(base.poll_interval, extra.poll_interval),
     )
+
+
+def estimate_polling_transfer_limit_hz(port_config: PortConfig) -> float | None:
+    if not port_config.poll_commands or port_config.baudrate <= 0:
+        return None
+    bytes_per_cycle = sum(len(command.request) + command.response_length for command in port_config.poll_commands)
+    if bytes_per_cycle <= 0:
+        return None
+    transfer_seconds = bytes_per_cycle * SERIAL_FRAME_BITS_PER_BYTE / port_config.baudrate
+    cycle_seconds = max(port_config.poll_interval, transfer_seconds)
+    if cycle_seconds <= 0:
+        return None
+    return 1.0 / cycle_seconds
+
+
+def estimate_config_transfer_limit_hz(ports: Mapping[str, PortConfig]) -> float | None:
+    limits = [
+        limit
+        for port_config in ports.values()
+        if (limit := estimate_polling_transfer_limit_hz(port_config)) is not None
+    ]
+    return min(limits) if limits else None
+
+
+def is_wind_port_config(port_config: PortConfig) -> bool:
+    return "W_s" in port_config.channels or "W_t" in port_config.channels
 
 
 class SerialReaderThread(threading.Thread):
@@ -1362,6 +1399,8 @@ class MonitorApp:
         self.serial_manager = SerialManager(config.ports, self.data_queue)
         self.sync_manager = SyncManager(config.ports.keys(), config.sync_timeout, config.max_sync_diff)
         self.history_manager = HistoryFitManager(config.history_plot, config.history_capacity)
+        self.transfer_limit_hz = estimate_config_transfer_limit_hz(config.ports)
+        self.uses_windtest_interval = any(is_wind_port_config(port_config) for port_config in config.ports.values())
 
         self.sample_count = 0
         self.discarded_count = 0
@@ -1393,6 +1432,12 @@ class MonitorApp:
         self.stop_button = pn.widgets.Button(name="停止采集", button_type="light")
         self.pause_toggle = pn.widgets.Toggle(name="暂停记录", button_type="warning", value=False)
         self.autoscale_checkbox = pn.widgets.Checkbox(name="视图跟随数据", value=False)
+        self.sample_interval_ms_input = pn.widgets.IntInput(
+            name="时间间隔 / ms",
+            value=self._default_windtest_interval_ms(),
+            start=0,
+            end=60000,
+        )
         self.time_window_slider = pn.widgets.IntSlider(
             name="实时窗口 / s",
             start=10,
@@ -1451,8 +1496,37 @@ class MonitorApp:
         self.clear_data_button.on_click(self._on_clear_data)
         self.export_button.on_click(self._on_export)
         self.refresh_ports_button.on_click(self._on_refresh_ports)
+        self.sample_interval_ms_input.param.watch(self._on_sample_interval_change, "value")
         for selector in self.port_selectors.values():
             selector.param.watch(lambda _event: self._refresh_port_status(), "value")
+
+    def _default_windtest_interval_ms(self) -> int:
+        for port_config in self.config.ports.values():
+            if is_wind_port_config(port_config):
+                return int(round(max(0.0, port_config.poll_interval) * 1000.0))
+        return 0
+
+    def _windtest_poll_interval_seconds(self) -> float:
+        try:
+            interval_ms = int(self.sample_interval_ms_input.value)
+        except (TypeError, ValueError):
+            interval_ms = self._default_windtest_interval_ms()
+        return max(0.0, interval_ms / 1000.0)
+
+    def _runtime_port_config(self, port_config: PortConfig) -> PortConfig:
+        if not is_wind_port_config(port_config):
+            return port_config
+        return replace(port_config, poll_interval=self._windtest_poll_interval_seconds())
+
+    def _on_sample_interval_change(self, _event) -> None:
+        if not self.uses_windtest_interval:
+            return
+        try:
+            self.transfer_limit_hz = estimate_config_transfer_limit_hz(self._effective_port_configs())
+        except ValueError:
+            self.transfer_limit_hz = estimate_config_transfer_limit_hz(self.config.ports)
+        self._refresh_port_status()
+        self._refresh_status_cards()
 
     def _build_port_selectors(self) -> dict[str, pn.widgets.Select]:
         selectors: dict[str, pn.widgets.Select] = {}
@@ -1501,14 +1575,15 @@ class MonitorApp:
             selected_port = selected_ports.get(default_port, default_port)
             if not selected_port:
                 raise ValueError("请选择有效串口")
+            runtime_config = self._runtime_port_config(port_config)
             if selected_port in effective_ports:
                 effective_ports[selected_port] = merge_port_configs(
                     effective_ports[selected_port],
-                    port_config,
+                    runtime_config,
                     selected_port,
                 )
             else:
-                effective_ports[selected_port] = port_config
+                effective_ports[selected_port] = runtime_config
         return effective_ports
 
     def _refresh_port_options(self) -> None:
@@ -1530,9 +1605,14 @@ class MonitorApp:
             detected_label = self.detected_port_labels.get(selected_port)
             state = "已识别" if detected_label else "未识别"
             channels = ", ".join(port_config.channels)
+            interval_text = (
+                f" · 间隔 {int(round(self._windtest_poll_interval_seconds() * 1000.0))} ms"
+                if is_wind_port_config(port_config)
+                else ""
+            )
             lines.append(
                 f'<div class="port-line"><strong>{html.escape(default_port)}</strong>'
-                f' → {html.escape(selected_port)} · {html.escape(channels)} · {state}</div>'
+                f' → {html.escape(selected_port)} · {html.escape(channels)} · {state}{interval_text}</div>'
             )
         try:
             self._effective_port_configs()
@@ -1542,6 +1622,7 @@ class MonitorApp:
 
     def _set_port_controls_disabled(self, disabled: bool) -> None:
         self.refresh_ports_button.disabled = disabled
+        self.sample_interval_ms_input.disabled = disabled
         for selector in self.port_selectors.values():
             selector.disabled = disabled
 
@@ -1589,6 +1670,7 @@ class MonitorApp:
         self.serial_manager.stop_all()
         self.serial_manager = SerialManager(effective_ports, self.data_queue)
         self.sync_manager = SyncManager(effective_ports.keys(), self.config.sync_timeout, self.config.max_sync_diff)
+        self.transfer_limit_hz = estimate_config_transfer_limit_hz(effective_ports)
         self.collecting = True
         self.last_sample_monotonic = None
         self.sync_manager.buffer.clear()
@@ -1657,6 +1739,7 @@ class MonitorApp:
                     self.pause_toggle,
                     self.autoscale_checkbox,
                     self.refresh_plot_button,
+                    *([self.sample_interval_ms_input] if self.uses_windtest_interval else []),
                     self.time_window_slider,
                     css_classes=["apple-panel"],
                     sizing_mode="stretch_width",
@@ -2286,6 +2369,7 @@ class MonitorApp:
         now = time.monotonic()
         elapsed = 0.0 if self.start_timestamp is None else max(0.0, now - self.start_timestamp)
         rate = self.sample_count / elapsed if elapsed > 0 else 0.0
+        transfer_limit = f"{self.transfer_limit_hz:.1f}" if self.transfer_limit_hz is not None else "n/a"
         if not self.collecting:
             status = "待机"
         elif self.pause_toggle.value:
@@ -2307,6 +2391,7 @@ class MonitorApp:
           <div class="metric-card"><div class="metric-name">状态</div><div class="metric-value">{html.escape(status)}</div></div>
           <div class="metric-card"><div class="metric-name">{html.escape(self.config.status_label)}</div><div class="metric-value">{self.sample_count}</div></div>
           <div class="metric-card"><div class="metric-name">采样速率</div><div class="metric-value">{rate:.2f}<span class="metric-unit">Hz</span></div></div>
+          <div class="metric-card"><div class="metric-name">当前理论上限</div><div class="metric-value">{transfer_limit}<span class="metric-unit">Hz</span></div></div>
           <div class="metric-card"><div class="metric-name">{html.escape(self.config.discarded_label)}</div><div class="metric-value">{self.discarded_count}</div></div>
           <div class="metric-card"><div class="metric-name">队列</div><div class="metric-value">{self.data_queue.qsize()}</div></div>
           <div class="metric-card"><div class="metric-name">拟合/导出</div><div class="metric-value" style="font-size: 15px;">{html.escape(self.fit_status)}</div></div>
@@ -2591,8 +2676,8 @@ def pressure_config() -> MonitorConfig:
 
 
 def wind_config() -> MonitorConfig:
-    wind_range = (0.0, 50.0)
-    temp_range = (0.0, 80.0)
+    wind_range = WIND_SPEED_RANGE_MPS
+    temp_range = WIND_TEMPERATURE_RANGE_C
     return MonitorConfig(
         title="热敏风速传感器实时监测",
         subtitle="风速/温度独立实验 | COM5: W_s, W_t | RS485 9600 baud",
@@ -2673,8 +2758,8 @@ def temperature_config() -> MonitorConfig:
 
 def pressure_wind_config() -> MonitorConfig:
     pressure_range = PRESSURE_RANGE_KPA
-    wind_range = (0.0, 50.0)
-    temp_range = (0.0, 80.0)
+    wind_range = WIND_SPEED_RANGE_MPS
+    temp_range = WIND_TEMPERATURE_RANGE_C
     return MonitorConfig(
         title="平板引射器压力-风速耦合监测",
         subtitle="压力/风速同步实验 | COM11: P1, P2 | COM5: W_s, W_t",
