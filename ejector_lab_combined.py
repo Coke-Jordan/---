@@ -873,7 +873,14 @@ def raw_wind_speed_to_mps(raw_speed: int) -> float:
 
 
 def raw_wind_temperature_to_celsius(raw_temperature: int) -> float:
-    return (raw_temperature - WIND_TEMPERATURE_OFFSET) / WIND_TEMPERATURE_SCALE
+    temperature = (raw_temperature - WIND_TEMPERATURE_OFFSET) / WIND_TEMPERATURE_SCALE
+    return min(max(temperature, WIND_TEMPERATURE_RANGE_C[0]), WIND_TEMPERATURE_RANGE_C[1])
+
+
+def format_latest_value(channel: str, value: float) -> str:
+    if channel in {"W_s", "W_t"}:
+        return f"{value:.1f}"
+    return f"{value:.3f}"
 
 
 def parse_wind_speed_response(response: bytes) -> Mapping[str, float] | None:
@@ -2417,11 +2424,12 @@ class MonitorApp:
             unit = self.channel_units.get(channel, "")
             title = self.channel_titles.get(channel, channel)
             color = self.channel_colors.get(channel, "#0f5c8c")
+            formatted_value = format_latest_value(channel, value)
             cards.append(
                 f"""
                 <div class="metric-card" style="border-left-color: {html.escape(color)};">
                   <div class="metric-name">{html.escape(title)}</div>
-                  <div class="metric-value">{value:.3f}<span class="metric-unit">{html.escape(unit)}</span></div>
+                  <div class="metric-value">{formatted_value}<span class="metric-unit">{html.escape(unit)}</span></div>
                 </div>
                 """
             )
