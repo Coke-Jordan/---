@@ -123,6 +123,7 @@ W_s = raw / 10.0
 温度返回：04 05 04 00 00 raw_hi raw_lo CRC_LO CRC_HI
 raw_temp = raw_hi * 256 + raw_lo
 W_t = (raw_temp - 400) / 10.0
+W_t 限幅到 0-80 C
 ```
 
 示例：风速 `raw = 0x09` 表示 `0.9 m/s`；温度 `raw_hi raw_lo = 02 EE`，即 `750`，表示 `(750 - 400) / 10 = 35.0 C`。
